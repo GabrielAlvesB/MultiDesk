@@ -5,9 +5,36 @@ janela por `post`, que coloca a ação na fila tratada pela thread do Tk.
 """
 
 import logging
+import shutil
+import subprocess
+import sys
 import threading
 
 log = logging.getLogger("multidesk.tray")
+
+
+def _linux_tray_visible():
+    """No Linux o ícone só aparece se o painel tiver uma bandeja (StatusNotifier).
+    O GNOME sem a extensão AppIndicator aceita o ícone mas não mostra nada."""
+    try:
+        from gi.repository import Gio, GLib
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        reply = bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                              "NameHasOwner", GLib.Variant("(s)", ("org.kde.StatusNotifierWatcher",)),
+                              None, Gio.DBusCallFlags.NONE, 2000, None)
+        return bool(reply.unpack()[0])
+    except Exception:
+        pass
+    if shutil.which("gdbus"):
+        try:
+            out = subprocess.run(
+                ["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus", "--object-path",
+                 "/org/freedesktop/DBus", "--method", "org.freedesktop.DBus.NameHasOwner",
+                 "org.kde.StatusNotifierWatcher"], capture_output=True, text=True, timeout=3).stdout
+            return "true" in out
+        except Exception:
+            pass
+    return False
 
 try:
     import pystray
@@ -42,6 +69,10 @@ class Tray:
             self._icon = pystray.Icon("multidesk", image, "MultiDesk", menu)
             threading.Thread(target=self._run, name="tray", daemon=True).start()
             self.available = True
+            if sys.platform.startswith("linux") and not _linux_tray_visible():
+                self.available = False
+                log.info("Painel sem bandeja do sistema: o ícone não vai aparecer; "
+                         "fechar a janela com o MultiDesk ativo vai encerrá-lo.")
         except Exception as e:
             log.warning("Não consegui criar o ícone da bandeja: %s", e)
 

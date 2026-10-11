@@ -38,6 +38,7 @@ class Client:
         threading.Thread(target=self.run, name="client", daemon=True).start()
 
     def stop(self):
+        log.info("Cliente parado")
         self._stop.set()
         if self._chan:
             self._chan.close()

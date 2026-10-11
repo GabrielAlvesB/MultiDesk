@@ -21,6 +21,7 @@ ICON = Path(__file__).resolve().parent / "assets" / "icon.png"
 INSTANCE_PORT = int(os.environ.get("MULTIDESK_INSTANCE_PORT", 24851))
 
 SIDE_LABEL = {"left": "esquerda", "right": "direita", "top": "acima", "bottom": "abaixo"}
+CLOSE_LABEL = {"ask": "Perguntar", "tray": "Ficar na bandeja", "quit": "Encerrar"}
 _OLD_SIDES = {v: k for k, v in SIDE_LABEL.items()}  # configs antigas guardavam em português
 
 # Paleta (claro, escuro)
@@ -217,9 +218,11 @@ class App:
         root.after(100, self.poll)
         root.after(1000, self.tick)
         if autostarted:
-            # Aberto no login: fica só na bandeja e já começa no modo salvo.
-            root.withdraw()
+            # Aberto no login: já começa no modo salvo, discreto. Só some de vez
+            # se houver ícone na bandeja; senão fica minimizado na barra de tarefas.
+            root.iconify()
             root.after(500, self.toggle)
+            root.after(2000, lambda: self.tray.available and self.root.withdraw())
 
     # ---- montagem da janela ---------------------------------------------
 
@@ -267,13 +270,24 @@ class App:
         # Rodapé
         foot = self.foot = ctk.CTkFrame(root, fg_color="transparent")
         foot.pack(fill="x", padx=20, pady=(10, 14))
+        opts = ctk.CTkFrame(foot, fg_color="transparent")
+        opts.pack(side="left")
+        row = ctk.CTkFrame(opts, fg_color="transparent")
+        row.pack(anchor="w")
         self.auto_var = tk.BooleanVar(value=autostart.is_enabled())
-        ctk.CTkSwitch(foot, text="Iniciar com o sistema", variable=self.auto_var, progress_color=ACCENT,
+        ctk.CTkSwitch(row, text="Iniciar com o sistema", variable=self.auto_var, progress_color=ACCENT,
                       command=self.toggle_autostart, font=f_small).pack(side="left")
-        self.log_btn = ctk.CTkButton(foot, text="Ver log", width=80, height=30, fg_color="transparent",
+        self.log_btn = ctk.CTkButton(row, text="Ver log", width=80, height=28, fg_color="transparent",
                                      border_width=1, border_color=BORDER, text_color=TEXT,
                                      hover_color=BORDER, command=self.toggle_log)
         self.log_btn.pack(side="left", padx=10)
+        row = ctk.CTkFrame(opts, fg_color="transparent")
+        row.pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(row, text="Ao fechar a janela:", font=f_small, text_color=MUTED).pack(side="left")
+        self.close_var = tk.StringVar(value=CLOSE_LABEL[self.cfg.get("on_close", "ask")])
+        ctk.CTkOptionMenu(row, values=list(CLOSE_LABEL.values()), variable=self.close_var, width=150, height=26,
+                          font=f_small, fg_color=BORDER, button_color=BORDER, button_hover_color=MUTED,
+                          text_color=TEXT, command=self._close_pref).pack(side="left", padx=(6, 0))
         self.start_btn = ctk.CTkButton(foot, text="Iniciar", width=150, height=40, corner_radius=10,
                                        fg_color=ACCENT, hover_color=ACCENT_HOVER,
                                        font=ctk.CTkFont(size=15, weight="bold"), command=self.toggle)
@@ -567,21 +581,76 @@ class App:
         self.root.lift()
         self.root.focus_force()
 
+    def _close_pref(self, label):
+        self.cfg["on_close"] = next(k for k, v in CLOSE_LABEL.items() if v == label)
+        save_config(self.cfg)
+
     def on_close(self):
-        """Fechar a janela com o MultiDesk ativo só esconde; "Sair" encerra."""
+        """Fechar a janela: parado encerra; ativo segue a preferência (perguntar/bandeja/encerrar).
+
+        Nunca fica rodando escondido sem um ícone visível na bandeja: senão o
+        mouse continuaria indo para o outro PC com o app "fechado".
+        """
         if not self.worker:
             self.quit()
             return
+        pref = self.cfg.get("on_close", "ask")
+        if pref == "quit":
+            self.quit()
+        elif pref == "tray" and self.tray.available:
+            self.hide_to_tray()
+        else:
+            self._ask_close()
+
+    def hide_to_tray(self):
         self.save()
         self.root.withdraw()
-        if not self.cfg.get("hide_tip_shown"):
-            self.cfg["hide_tip_shown"] = True
-            save_config(self.cfg)
-            if self.tray.available:
-                self.tray.notify("O MultiDesk continua rodando aqui na bandeja.")
-            else:
-                messagebox.showinfo("MultiDesk", "O MultiDesk continua rodando em segundo plano.\n\n"
-                                    "Para ver a janela de novo, abra o MultiDesk pelo menu.")
+        self.tray.notify("O MultiDesk continua ativo aqui na bandeja. Use Sair no menu para encerrar.")
+
+    def _ask_close(self):
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("Fechar o MultiDesk")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=BG)
+        dlg.transient(self.root)
+        who = "compartilhando o mouse e o teclado" if self.mode == "server" else "conectado ao servidor"
+        ctk.CTkLabel(dlg, text="O MultiDesk ainda está ativo", font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=TEXT).pack(anchor="w", padx=22, pady=(18, 4))
+        tray_ok = self.tray.available
+        msg = (f"Ele está {who}. Você pode deixá-lo rodando na bandeja do sistema\n"
+               "ou encerrar de vez." if tray_ok else
+               f"Ele está {who}. Fechar a janela vai encerrar o MultiDesk.")
+        ctk.CTkLabel(dlg, text=msg, justify="left", text_color=MUTED,
+                     font=ctk.CTkFont(size=13)).pack(anchor="w", padx=22)
+        remember = tk.BooleanVar(value=False)
+        if tray_ok:
+            ctk.CTkCheckBox(dlg, text="Lembrar minha escolha", variable=remember, font=ctk.CTkFont(size=12),
+                            fg_color=ACCENT, hover_color=ACCENT_HOVER).pack(anchor="w", padx=22, pady=(12, 0))
+        btns = ctk.CTkFrame(dlg, fg_color="transparent")
+        btns.pack(fill="x", padx=22, pady=(16, 18))
+
+        def choose(action):
+            if remember.get():
+                self.cfg["on_close"] = action
+                self.close_var.set(CLOSE_LABEL[action])
+                save_config(self.cfg)
+            dlg.destroy()
+            self.hide_to_tray() if action == "tray" else self.quit()
+
+        ctk.CTkButton(btns, text="Encerrar MultiDesk", fg_color=DANGER, hover_color=DANGER_HOVER, height=36,
+                      command=lambda: choose("quit")).pack(side="right")
+        if tray_ok:
+            ctk.CTkButton(btns, text="Deixar na bandeja", fg_color=ACCENT, hover_color=ACCENT_HOVER, height=36,
+                          command=lambda: choose("tray")).pack(side="right", padx=(0, 8))
+        ctk.CTkButton(btns, text="Cancelar", fg_color="transparent", text_color=TEXT, hover_color=BORDER,
+                      border_width=1, border_color=BORDER, width=90, height=36,
+                      command=dlg.destroy).pack(side="left")
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        dlg.after(50, lambda: (dlg.lift(), dlg.focus_force(), dlg.grab_set()))
+        self._close_dialog = dlg
 
     def quit(self):
         if self.worker:

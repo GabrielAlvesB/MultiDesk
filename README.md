@@ -33,7 +33,7 @@ Os instaladores ficam na pasta `dist/` e já trazem tudo de que o programa preci
 
 ### Windows
 
-1. Dê dois cliques em **`MultiDesk-Setup-0.2.0.exe`** e avance o assistente.
+1. Dê dois cliques em **`MultiDesk-Setup-0.2.1.exe`** e avance o assistente.
    Não pede senha de administrador.
 2. O MultiDesk aparece no Menu Iniciar (e na área de trabalho, se você marcar a opção).
 3. Para remover: *Configurações → Aplicativos → MultiDesk → Desinstalar*.
@@ -47,8 +47,8 @@ o programa: permita em **redes privadas**.
 
 ### Linux (Ubuntu, Debian, Mint, Pop!_OS, Zorin...)
 
-1. Dê dois cliques em **`multidesk_0.2.0_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
-   Pelo terminal: `sudo apt install ./multidesk_0.2.0_all.deb` (use `apt`, não `dpkg -i`:
+1. Dê dois cliques em **`multidesk_0.2.1_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
+   Pelo terminal: `sudo apt install ./multidesk_0.2.1_all.deb` (use `apt`, não `dpkg -i`:
    só o `apt` baixa as dependências).
 2. **Reinicie o computador** (ou saia e entre na sessão) na primeira instalação, para liberar
    o teclado/mouse virtuais.
@@ -65,9 +65,12 @@ Se o servidor for Linux e usar firewall: `sudo ufw allow 24850/tcp`.
 
 ### Segundo plano e iniciar com o sistema
 
-Com o MultiDesk ativo, **fechar a janela não encerra o programa**: ele continua rodando com um
-ícone na bandeja do sistema (perto do relógio no Windows; na barra superior no Ubuntu).
-Clique no ícone para abrir a janela; o menu dele também tem **Iniciar/Parar** e **Sair**.
+Ao fechar a janela com o MultiDesk ativo, ele **pergunta** se você quer deixá-lo rodando na
+bandeja do sistema (perto do relógio no Windows; na barra superior no Ubuntu) ou encerrar.
+Dá para marcar "Lembrar minha escolha" ou mudar depois em **"Ao fechar a janela"**, no rodapé.
+Enquanto estiver na bandeja, o mouse continua passando para os outros PCs: para parar, use
+**Parar** ou **Sair** no menu do ícone. Se o sistema não tiver bandeja visível, fechar a
+janela sempre encerra o MultiDesk (ele nunca fica rodando escondido).
 
 Ligue **"Iniciar com o sistema"** na janela para que, ao ligar o computador, o MultiDesk abra
 direto na bandeja e já comece no modo que você usou por último (servidor ou cliente).

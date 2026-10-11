@@ -141,6 +141,7 @@ class Server:
             self.clipboard.stop()
         if self._sock:
             self._sock.close()
+        log.info("Servidor parado: mouse e teclado não são mais compartilhados")
         self.on_change()
 
     # ---- conexões ------------------------------------------------------
