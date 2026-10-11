@@ -1,0 +1,4 @@
+pynput>=1.8
+cryptography>=42
+pyperclip>=1.8
+python-xlib>=0.33; sys_platform == "linux"
