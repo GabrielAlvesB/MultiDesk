@@ -5,6 +5,9 @@ import logging
 from ctypes import wintypes
 
 from pynput import keyboard, mouse
+from pynput._util.win32 import INPUT, INPUT_union, KEYBDINPUT, SendInput
+
+from ..keymap import EV_TO_VK, ev_to_win, win_to_ev
 
 log = logging.getLogger("multidesk.win")
 
@@ -26,6 +29,7 @@ _BUTTON_MSGS = {
 }
 WM_MOUSEWHEEL, WM_XBUTTONDOWN, WM_XBUTTONUP, WM_MOUSEHWHEEL = 0x20A, 0x20B, 0x20C, 0x20E
 LLMHF_INJECTED = 0x01
+LLKHF_EXTENDED = 0x01
 LLKHF_INJECTED = 0x10
 MAPVK_VK_TO_CHAR = 2
 
@@ -59,12 +63,16 @@ def screen_bounds():
     return gsm(76), gsm(77), gsm(78), gsm(79)  # SM_X/Y/CX/CYVIRTUALSCREEN
 
 
-def key_desc(vk):
+def key_desc(vk, scan=0, extended=False):
+    """Descrição da tecla: "ev" é a tecla física; "k"/"vk"/"ch" ficam de reserva."""
+    desc = {"ev": win_to_ev(scan, extended, vk), "os": OS}
     name = SPECIAL_VK.get(vk)
     if name:
-        return {"k": name}
-    ch = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) & 0x7FFF  # bit alto = tecla morta
-    return {"vk": vk, "ch": chr(ch).lower() if ch else None, "os": OS}
+        desc["k"] = name
+    else:
+        ch = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) & 0x7FFF  # bit alto = tecla morta
+        desc.update(vk=vk, ch=chr(ch).lower() if ch else None)
+    return desc
 
 
 class Capture:
@@ -129,9 +137,15 @@ class Capture:
     def _kbd_filter(self, msg, data):
         if data.flags & LLKHF_INJECTED:
             return True
+        if data.scanCode & 0x200:
+            # Ctrl "fantasma" que o Windows gera junto com o AltGr (scan 0x21D).
+            # Repassar isso faz AltGr+Q virar Ctrl+/ no outro PC.
+            if self.remote:
+                self._kl.suppress_event()
+            return True
         down = msg in (WM_KEYDOWN, WM_SYSKEYDOWN)
         try:
-            self.sink.on_key(key_desc(data.vkCode), down)
+            self.sink.on_key(key_desc(data.vkCode, data.scanCode, bool(data.flags & LLKHF_EXTENDED)), down)
         except Exception:
             log.exception("erro tratando evento de teclado")
         if self.remote:
@@ -164,6 +178,13 @@ class Injector:
         self.mouse.scroll(dx, dy)  # pynput multiplica por WHEEL_DELTA, aceita fração
 
     def _resolve(self, desc):
+        ev = desc.get("ev")
+        if ev:
+            if ev in EV_TO_VK:
+                return keyboard.KeyCode.from_vk(EV_TO_VK[ev])
+            sc = ev_to_win(ev)
+            if sc:
+                return ("scan",) + sc
         name = desc.get("k")
         if name:
             return getattr(keyboard.Key, name, None)
@@ -185,16 +206,27 @@ class Injector:
         if key is None:
             return
         if down:
-            self.kb.press(key)
+            self._press(key, True)
             self._held_keys.add(key)
         else:
-            self.kb.release(key)
+            self._press(key, False)
             self._held_keys.discard(key)
+
+    def _press(self, key, down):
+        if isinstance(key, tuple):  # ("scan", código, extended): tecla física
+            _, scan, ext = key
+            flags = KEYBDINPUT.SCANCODE | (KEYBDINPUT.EXTENDEDKEY if ext else 0) | (0 if down else KEYBDINPUT.KEYUP)
+            SendInput(1, ctypes.byref(INPUT(type=INPUT.KEYBOARD, value=INPUT_union(
+                ki=KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags)))), ctypes.sizeof(INPUT))
+        elif down:
+            self.kb.press(key)
+        else:
+            self.kb.release(key)
 
     def release_all(self):
         for key in list(self._held_keys):
             try:
-                self.kb.release(key)
+                self._press(key, False)
             except Exception:
                 pass
         for btn in list(self._held_buttons):

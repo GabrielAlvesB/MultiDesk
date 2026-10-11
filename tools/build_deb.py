@@ -1,4 +1,4 @@
-﻿"""Gera dist/multidesk_<versão>_all.deb (Ubuntu, Debian, Mint, Pop!_OS...).
+"""Gera dist/multidesk_<versão>_all.deb (Ubuntu, Debian, Mint, Pop!_OS...).
 
 Roda em qualquer sistema (inclusive Windows): o .deb é montado em Python puro.
 O pacote usa o Python do próprio Linux. As dependências que existem nos
@@ -36,8 +36,18 @@ Description: Um mouse e um teclado para vários computadores
  Windows e Linux pela rede, levando o cursor até a borda da tela.
 """
 
+# Libera o /dev/uinput para o usuário da sessão ativa (o mesmo que a Steam faz
+# para controles). Sem isso só o root consegue criar teclado/mouse virtuais.
+UDEV_RULE = """KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
+"""
+
 POSTINST = """#!/bin/sh
 set -e
+modprobe uinput 2>/dev/null || true
+if command -v udevadm >/dev/null; then
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=change 2>/dev/null || true
+fi
 command -v update-desktop-database >/dev/null && update-desktop-database -q /usr/share/applications || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true
 exit 0
@@ -138,6 +148,8 @@ def main():
             files[dest] = (src.read_bytes(), 0o644)
     files[f"{LIB}/run.py"] = (RUN_PY.encode(), 0o644)
     files["usr/bin/multidesk"] = (LAUNCHER.encode(), 0o755)
+    files["usr/lib/udev/rules.d/70-multidesk-uinput.rules"] = (UDEV_RULE.encode(), 0o644)
+    files["usr/lib/modules-load.d/multidesk.conf"] = (b"uinput\n", 0o644)
     files["usr/share/applications/multidesk.desktop"] = (DESKTOP.encode(), 0o644)
     files["usr/share/icons/hicolor/256x256/apps/multidesk.png"] = (
         (ROOT / "multidesk" / "assets" / "icon.png").read_bytes(), 0o644)

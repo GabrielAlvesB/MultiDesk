@@ -1,7 +1,11 @@
-"""Backend Linux (X11): RECORD via pynput, grab do X para suprimir e XTest para simular.
+"""Backend Linux.
 
-Precisa de sessão X11 ("Ubuntu on Xorg" na tela de login). No Wayland o
-sistema bloqueia captura e simulação de entrada por programas comuns.
+Cliente (ser controlado): teclado e mouse virtuais via /dev/uinput, que
+funcionam no Wayland e no X11 (o Deskflow faz o equivalente com libei).
+Se o uinput não estiver acessível, cai para XTest, que só funciona no X11.
+
+Servidor (controlar os outros): RECORD via pynput + grab do X. Precisa de
+sessão X11, pois o Wayland não deixa programas comuns capturarem a entrada.
 """
 
 import logging
@@ -14,6 +18,8 @@ import Xlib.ext.xtest
 import Xlib.XK
 from Xlib import X
 from pynput import keyboard, mouse
+
+from . import uinput
 
 log = logging.getLogger("multidesk.linux")
 
@@ -32,10 +38,12 @@ _DEAD_KEYSYMS = {
 }
 
 
+def is_wayland():
+    return os.environ.get("XDG_SESSION_TYPE") == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
 def init_process():
-    if os.environ.get("XDG_SESSION_TYPE") == "wayland":
-        log.warning("Sessão Wayland detectada: o MultiDesk precisa de X11. "
-                    "Saia da sessão e escolha 'Ubuntu on Xorg' (ou equivalente) no login.")
+    log.info("Sessão gráfica: %s", "Wayland" if is_wayland() else "X11")
 
 
 def screen_bounds():
@@ -47,10 +55,23 @@ def screen_bounds():
         d.close()
 
 
-def key_desc(key):
+def key_desc(key, x_keycode=None):
+    """Descrição da tecla: "ev" é a tecla física; "k"/"vk"/"ch" ficam de reserva."""
+    desc = {"ev": x_keycode - 8 if x_keycode and x_keycode > 8 else None, "os": OS}
     if isinstance(key, keyboard.Key):
-        return {"k": key.name}
-    return {"vk": getattr(key, "vk", None), "ch": getattr(key, "char", None), "os": OS}
+        desc["k"] = key.name
+    elif key is not None:
+        desc.update(vk=getattr(key, "vk", None), ch=getattr(key, "char", None))
+    return desc
+
+
+class _KeyListener(keyboard.Listener):
+    """Listener do pynput que também guarda o keycode X (tecla física)."""
+    last_keycode = None
+
+    def _handle_message(self, display, event, injected):
+        self.last_keycode = event.detail
+        super()._handle_message(display, event, injected)
 
 
 def char_to_keysym(ch):
@@ -122,13 +143,16 @@ class Capture:
     def __init__(self, sink):
         self.sink = sink
         self.remote = False
+        if is_wayland():
+            log.error("Este PC está numa sessão Wayland: como SERVIDOR o MultiDesk não consegue "
+                      "capturar o mouse/teclado. Use 'Ubuntu on Xorg' no login, ou deixe este PC como cliente.")
         self._grabber = _Grabber()
         _, _, w, h = screen_bounds()
         self._limit = (w // 4, h // 4)
         self._center = (w // 2, h // 2)
         self._last = self._center
         self._ml = mouse.Listener(on_move=self._on_move, on_click=self._on_click, on_scroll=self._on_scroll)
-        self._kl = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
+        self._kl = _KeyListener(on_press=self._on_press, on_release=self._on_release)
 
     def start(self):
         self._ml.start()
@@ -184,15 +208,92 @@ class Capture:
             self.sink.on_scroll(dx, dy)
 
     def _on_press(self, key):
-        if key is not None:
-            self.sink.on_key(key_desc(key), True)
+        self.sink.on_key(key_desc(key, self._kl.last_keycode), True)
 
     def _on_release(self, key):
-        if key is not None:
-            self.sink.on_key(key_desc(key), False)
+        self.sink.on_key(key_desc(key, self._kl.last_keycode), False)
 
 
 class Injector:
+    """Simula a entrada pelo uinput; sem acesso a ele, usa XTest (só X11)."""
+
+    _BUTTONS = {"left": uinput.BTN_LEFT, "right": uinput.BTN_RIGHT, "middle": uinput.BTN_MIDDLE,
+                "x1": uinput.BTN_SIDE, "x2": uinput.BTN_EXTRA}
+
+    def __init__(self):
+        self.bounds = screen_bounds()
+        self._x = None
+        self._lock = threading.Lock()
+        self._scroll_acc = [0.0, 0.0]
+        self._held = set()  # (tipo, código) pressionados
+        try:
+            self._kbd = uinput.keyboard()
+            self._ptr = uinput.pointer()
+            time.sleep(0.3)  # tempo para o compositor reconhecer os dispositivos novos
+            log.info("Simulando mouse/teclado pelo uinput (funciona no Wayland e no X11)")
+        except OSError as e:
+            self._kbd = self._ptr = None
+            log.warning("Sem acesso ao /dev/uinput (%s); usando XTest.", e)
+            if is_wayland():
+                log.error("No Wayland o XTest só alcança alguns programas. Reinstale o pacote .deb "
+                          "e reinicie a sessão (ou o PC) para liberar o /dev/uinput.")
+            self._x = _XInjector()
+
+    def move(self, x, y):
+        if self._x:
+            return self._x.move(x, y)
+        bx, by, bw, bh = self.bounds
+        ax = round(min(max((x - bx) / max(bw - 1, 1), 0), 1) * uinput.ABS_MAX)
+        ay = round(min(max((y - by) / max(bh - 1, 1), 0), 1) * uinput.ABS_MAX)
+        with self._lock:
+            self._ptr.emit([(uinput.EV_ABS, uinput.ABS_X, ax), (uinput.EV_ABS, uinput.ABS_Y, ay)])
+
+    def button(self, name, down):
+        if self._x:
+            return self._x.button(name, down)
+        code = self._BUTTONS.get(name)
+        if code:
+            self._key(self._ptr, code, down)
+
+    def scroll(self, dx, dy):
+        if self._x:
+            return self._x.scroll(dx, dy)
+        self._scroll_acc[0] += dx
+        self._scroll_acc[1] += dy
+        ix, iy = int(self._scroll_acc[0]), int(self._scroll_acc[1])
+        self._scroll_acc[0] -= ix
+        self._scroll_acc[1] -= iy
+        events = [(uinput.EV_REL, code, v) for code, v in ((uinput.REL_WHEEL, iy), (uinput.REL_HWHEEL, ix)) if v]
+        if events:
+            with self._lock:
+                self._ptr.emit(events)
+
+    def key(self, desc, down):
+        if self._x:
+            return self._x.key(desc, down)
+        ev = desc.get("ev")
+        if ev and 0 < ev < 248:
+            self._key(self._kbd, ev, down)
+        else:
+            log.debug("tecla sem código físico ignorada: %s", desc)
+
+    def _key(self, dev, code, down):
+        with self._lock:
+            dev.emit([(uinput.EV_KEY, code, 1 if down else 0)])
+        (self._held.add if down else self._held.discard)((dev is self._ptr, code))
+
+    def release_all(self):
+        if self._x:
+            return self._x.release_all()
+        for is_ptr, code in list(self._held):
+            try:
+                self._key(self._ptr if is_ptr else self._kbd, code, False)
+            except OSError:
+                pass
+        self._held.clear()
+
+
+class _XInjector:
     def __init__(self):
         self.mouse = mouse.Controller()
         self.kb = keyboard.Controller()
@@ -263,6 +364,13 @@ class Injector:
         return code
 
     def key(self, desc, down):
+        ev = desc.get("ev")
+        if ev:  # tecla física: keycode X = evdev + 8
+            with self._lock:
+                Xlib.ext.xtest.fake_input(self.d, X.KeyPress if down else X.KeyRelease, ev + 8)
+                self.d.sync()
+            (self._held_codes.add if down else self._held_codes.discard)(ev + 8)
+            return
         name = desc.get("k")
         if name:
             key = getattr(keyboard.Key, name, None)

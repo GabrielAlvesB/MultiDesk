@@ -31,7 +31,7 @@ Os instaladores ficam na pasta `dist/` e já trazem tudo de que o programa preci
 
 ### Windows
 
-1. Dê dois cliques em **`MultiDesk-Setup-0.1.0.exe`** e avance o assistente.
+1. Dê dois cliques em **`MultiDesk-Setup-0.1.1.exe`** e avance o assistente.
    Não pede senha de administrador.
 2. O MultiDesk aparece no Menu Iniciar (e na área de trabalho, se você marcar a opção).
 3. Para remover: *Configurações → Aplicativos → MultiDesk → Desinstalar*.
@@ -45,14 +45,19 @@ o programa: permita em **redes privadas**.
 
 ### Linux (Ubuntu, Debian, Mint, Pop!_OS, Zorin...)
 
-1. Dê dois cliques em **`multidesk_0.1.0_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
-   Pelo terminal: `sudo apt install ./multidesk_0.1.0_all.deb`.
-2. O MultiDesk aparece no menu de aplicativos.
-3. Para remover: pela loja de aplicativos, ou `sudo apt remove multidesk`.
+1. Dê dois cliques em **`multidesk_0.1.1_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
+   Pelo terminal: `sudo apt install ./multidesk_0.1.1_all.deb` (use `apt`, não `dpkg -i`:
+   só o `apt` baixa as dependências).
+2. **Reinicie o computador** (ou saia e entre na sessão) na primeira instalação, para liberar
+   o teclado/mouse virtuais.
+3. O MultiDesk aparece no menu de aplicativos.
+4. Para remover: pela loja de aplicativos, ou `sudo apt remove multidesk`.
 
-> **Importante: use uma sessão X11.** No Wayland o sistema bloqueia programas que capturam
-> ou simulam mouse e teclado. Na tela de login, clique na engrenagem e escolha
-> **"Ubuntu on Xorg"** (ou "GNOME on Xorg" / "Plasma (X11)").
+**Wayland ou X11?** Para ser **controlado** (cliente), o Linux funciona nos dois: o MultiDesk
+cria um teclado e um mouse virtuais no kernel (`/dev/uinput`), como se fossem USB.
+Para **controlar** os outros (servidor), o Linux precisa de sessão **X11**, porque o Wayland
+não deixa programas capturarem o mouse e o teclado. Na tela de login, clique na engrenagem e
+escolha **"Ubuntu on Xorg"** (ou "GNOME on Xorg" / "Plasma (X11)").
 
 Se o servidor for Linux e usar firewall: `sudo ufw allow 24850/tcp`.
 
@@ -93,7 +98,7 @@ Opções úteis: `--port`, `--code`, `--name`, `--no-clipboard`, `-v` (log detal
 - Windows: o cliente não consegue controlar janelas abertas **como administrador**
   (por exemplo o Gerenciador de Tarefas), a menos que o MultiDesk também rode como administrador.
   Ctrl+Alt+Del não pode ser repassado.
-- Linux: só X11 (veja acima).
+- Linux como servidor: só X11 (veja acima). Como cliente funciona no Wayland e no X11.
 - Os clientes ficam encostados no servidor: não dá para ir de um cliente direto para outro.
 - Os dois PCs precisam estar na mesma rede, ou alcançáveis pelo IP do link (VPN como Tailscale/ZeroTier serve).
 
@@ -118,6 +123,8 @@ use `iniciar.bat` (Windows) ou `iniciar.sh` (Linux).
 | `multidesk/client.py` | Recebe os eventos e simula mouse/teclado; reconecta sozinho |
 | `multidesk/crypto.py` | Handshake com o código de pareamento e canal criptografado |
 | `multidesk/platform/windows.py` | Hooks de baixo nível e SendInput |
-| `multidesk/platform/linux.py` | RECORD/XGrab/XTest no X11 |
+| `multidesk/platform/linux.py` | Captura no X11 (RECORD/XGrab); simulação via uinput ou XTest |
+| `multidesk/platform/uinput.py` | Teclado e mouse virtuais do kernel (Wayland e X11) |
+| `multidesk/keymap.py` | Tradução de teclas físicas: scan code do Windows ↔ evdev do Linux |
 | `multidesk/clipboard.py` | Sincroniza a área de transferência |
 | `multidesk/gui.py` | A janela (tkinter) |
