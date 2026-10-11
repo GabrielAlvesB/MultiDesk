@@ -17,6 +17,7 @@ $version = & $py -c "import multidesk; print(multidesk.__version__)"
     --icon packaging\windows\multidesk.ico `
     --add-data "multidesk\assets;multidesk\assets" `
     --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 `
+    --hidden-import pystray._win32 --collect-all customtkinter `
     --distpath dist --workpath build packaging\entry.py
 if ($LASTEXITCODE) { throw "PyInstaller falhou" }
 

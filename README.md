@@ -24,6 +24,8 @@ Foi escrito do zero em Python: não usa código do Deskflow.
 - Dá para conectar até 4 clientes, um em cada lado da tela do servidor (direita, esquerda, acima, abaixo).
 - **Scroll Lock** prende o cursor na tela em que ele está (bom para jogos). Aperte de novo para soltar.
 - Se um cliente cai enquanto você está controlando ele, o controle volta na hora para o servidor.
+- A janela mostra o **ping** de cada conexão, atualizado a cada segundo
+  (verde até 30 ms, amarelo até 100 ms, vermelho acima disso).
 
 ## Instalação
 
@@ -31,7 +33,7 @@ Os instaladores ficam na pasta `dist/` e já trazem tudo de que o programa preci
 
 ### Windows
 
-1. Dê dois cliques em **`MultiDesk-Setup-0.1.1.exe`** e avance o assistente.
+1. Dê dois cliques em **`MultiDesk-Setup-0.2.0.exe`** e avance o assistente.
    Não pede senha de administrador.
 2. O MultiDesk aparece no Menu Iniciar (e na área de trabalho, se você marcar a opção).
 3. Para remover: *Configurações → Aplicativos → MultiDesk → Desinstalar*.
@@ -45,8 +47,8 @@ o programa: permita em **redes privadas**.
 
 ### Linux (Ubuntu, Debian, Mint, Pop!_OS, Zorin...)
 
-1. Dê dois cliques em **`multidesk_0.1.1_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
-   Pelo terminal: `sudo apt install ./multidesk_0.1.1_all.deb` (use `apt`, não `dpkg -i`:
+1. Dê dois cliques em **`multidesk_0.2.0_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
+   Pelo terminal: `sudo apt install ./multidesk_0.2.0_all.deb` (use `apt`, não `dpkg -i`:
    só o `apt` baixa as dependências).
 2. **Reinicie o computador** (ou saia e entre na sessão) na primeira instalação, para liberar
    o teclado/mouse virtuais.
@@ -61,21 +63,30 @@ escolha **"Ubuntu on Xorg"** (ou "GNOME on Xorg" / "Plasma (X11)").
 
 Se o servidor for Linux e usar firewall: `sudo ufw allow 24850/tcp`.
 
-### Iniciar com o sistema
+### Segundo plano e iniciar com o sistema
 
-Marque **"Iniciar com o sistema e conectar sozinho"** na janela. Depois disso, ao ligar o
-computador o MultiDesk abre escondido e já começa no modo que você usou por último
-(servidor ou cliente). Fechar a janela com ele ativo só esconde: abrir pelo atalho mostra
-de novo, e o botão **Sair** encerra.
+Com o MultiDesk ativo, **fechar a janela não encerra o programa**: ele continua rodando com um
+ícone na bandeja do sistema (perto do relógio no Windows; na barra superior no Ubuntu).
+Clique no ícone para abrir a janela; o menu dele também tem **Iniciar/Parar** e **Sair**.
+
+Ligue **"Iniciar com o sistema"** na janela para que, ao ligar o computador, o MultiDesk abra
+direto na bandeja e já comece no modo que você usou por último (servidor ou cliente).
+
+> Linux: o ícone usa AppIndicator. O Ubuntu já vem com isso; no GNOME "puro" (Fedora,
+> Debian) instale a extensão *AppIndicator and KStatusNotifierItem Support*. Sem ela o
+> MultiDesk roda em segundo plano do mesmo jeito: abra pelo menu de aplicativos para ver a janela.
 
 O log fica em `%LOCALAPPDATA%\MultiDesk\multidesk.log` (Windows) ou
 `~/.local/state/multidesk/multidesk.log` (Linux).
 
 ## Uso pela janela
 
-1. No PC com o mouse/teclado: escolha **servidor**, clique em **Iniciar** e depois em **Copiar** para copiar o link.
-2. No outro PC: escolha **cliente**, cole o link, diga de que lado ele fica em relação ao servidor e clique em **Iniciar**.
-3. Leve o mouse até aquela borda da tela.
+1. No PC com o mouse/teclado: escolha **Compartilhar este PC**, clique em **Copiar** para copiar
+   o link e em **Iniciar**.
+2. No outro PC: escolha **Ser controlado**, cole o link, clique no desenho para dizer de que lado
+   ele fica em relação ao servidor e clique em **Iniciar**.
+3. Leve o mouse até aquela borda da tela. O desenho do servidor mostra cada PC conectado com o
+   ping, e destaca em verde o que você está controlando.
 
 ## Uso pela linha de comando
 
@@ -127,4 +138,5 @@ use `iniciar.bat` (Windows) ou `iniciar.sh` (Linux).
 | `multidesk/platform/uinput.py` | Teclado e mouse virtuais do kernel (Wayland e X11) |
 | `multidesk/keymap.py` | Tradução de teclas físicas: scan code do Windows ↔ evdev do Linux |
 | `multidesk/clipboard.py` | Sincroniza a área de transferência |
-| `multidesk/gui.py` | A janela (tkinter) |
+| `multidesk/gui.py` | A janela (customtkinter) |
+| `multidesk/tray.py` | Ícone na bandeja do sistema (pystray) |

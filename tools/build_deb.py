@@ -19,8 +19,11 @@ import multidesk  # noqa: E402
 
 VERSION = multidesk.__version__
 PKG = "multidesk"
-DEPENDS = "python3 (>= 3.8), python3-xlib, python3-cryptography, python3-tk, xclip"
-VENDORED = ("pynput", "six", "pyperclip")
+DEPENDS = ("python3 (>= 3.10), python3-xlib, python3-cryptography, python3-tk, "
+           "python3-pil, python3-pil.imagetk, xclip")
+# Ícone na bandeja: AppIndicator (Ubuntu já traz a extensão do GNOME ativada).
+RECOMMENDS = "python3-gi, gir1.2-ayatanaappindicator3-0.1"
+VENDORED = ("pynput", "six", "pyperclip", "customtkinter", "darkdetect", "packaging", "pystray")
 LIB = "usr/lib/multidesk"
 MTIME = int(time.time())
 
@@ -30,6 +33,7 @@ Section: utils
 Priority: optional
 Architecture: all
 Depends: {DEPENDS}
+Recommends: {RECOMMENDS}
 Maintainer: GabrielAlvesB <GabrielAlvesB@users.noreply.github.com>
 Description: Um mouse e um teclado para vários computadores
  Compartilhe mouse, teclado e área de transferência entre computadores
@@ -89,7 +93,7 @@ def _vendored():
         if spec is None:
             sys.exit(f"Instale {name} (pip install -r requirements.txt) antes de gerar o .deb")
         origin = Path(spec.origin)
-        if origin.name == "__init__.py":
+        if spec.submodule_search_locations and origin.name == "__init__.py":
             yield from _source_files(origin.parent, f"{LIB}/vendor/{name}")
         else:
             yield origin, f"{LIB}/vendor/{origin.name}"

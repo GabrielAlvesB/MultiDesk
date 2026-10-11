@@ -9,6 +9,7 @@ import logging
 import queue
 import socket
 import threading
+import time
 
 from . import platform
 from .clipboard import ClipboardSync
@@ -19,7 +20,7 @@ log = logging.getLogger("multidesk.server")
 
 SIDES = ("right", "left", "top", "bottom")
 SIDE_PT = {"right": "direita", "left": "esquerda", "top": "acima", "bottom": "abaixo"}
-PING_INTERVAL = 2.0
+PING_INTERVAL = 1.0
 TIMEOUT = 10.0
 
 
@@ -34,6 +35,7 @@ class Remote:
         self.bounds = bounds  # (x, y, w, h) da tela do cliente
         self.side = side
         self.alive = True
+        self.rtt = None  # ping em ms (ida e volta)
         self._q = queue.Queue()
 
     def start(self):
@@ -52,12 +54,17 @@ class Remote:
 
     def _writer(self):
         # Fila + thread própria: o hook de entrada nunca espera pela rede.
+        next_ping = 0.0
         try:
             while self.alive:
+                now = time.monotonic()
+                if now >= next_ping:
+                    self.chan.send({"t": "ping", "ts": now})
+                    next_ping = now + PING_INTERVAL
                 try:
-                    msg = self._q.get(timeout=PING_INTERVAL)
+                    msg = self._q.get(timeout=max(next_ping - now, 0.01))
                 except queue.Empty:
-                    msg = {"t": "ping"}
+                    continue
                 if msg is None:
                     break
                 self.chan.send(msg)
@@ -69,8 +76,14 @@ class Remote:
         try:
             while self.alive:
                 msg = self.chan.recv()
-                if msg.get("t") == "clip":
+                t = msg.get("t")
+                if t == "clip":
                     self.server._clip_from(self, msg.get("text"))
+                elif t == "ping":
+                    self.send({"t": "pong", "ts": msg.get("ts")})
+                elif t == "pong" and isinstance(msg.get("ts"), (int, float)):
+                    self.rtt = (time.monotonic() - msg["ts"]) * 1000
+                    self.server.on_change()
         except (OSError, ConnectionError, ValueError) as e:
             log.debug("leitura de %s terminou: %s", self.name, e)
         except Exception:
