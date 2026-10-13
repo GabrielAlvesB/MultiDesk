@@ -3,7 +3,7 @@
 Roda em qualquer sistema (inclusive Windows): o .deb é montado em Python puro.
 O pacote usa o Python do próprio Linux. As dependências que existem nos
 repositórios (Xlib, cryptography, Tk, xclip) entram como Depends do apt, e as
-que não existem (pynput, six, pyperclip, todas Python puro) vão junto no pacote.
+que não existem (pynput, customtkinter, pystray..., todas Python puro) vão junto no pacote.
 """
 
 import importlib.util
@@ -23,7 +23,7 @@ DEPENDS = ("python3 (>= 3.10), python3-xlib, python3-cryptography, python3-tk, "
            "python3-pil, python3-pil.imagetk, xclip")
 # Ícone na bandeja: AppIndicator (Ubuntu já traz a extensão do GNOME ativada).
 RECOMMENDS = "python3-gi, gir1.2-ayatanaappindicator3-0.1"
-VENDORED = ("pynput", "six", "pyperclip", "customtkinter", "darkdetect", "packaging", "pystray")
+VENDORED = ("pynput", "six", "customtkinter", "darkdetect", "packaging", "pystray")
 LIB = "usr/lib/multidesk"
 MTIME = int(time.time())
 

@@ -3,7 +3,7 @@
 Um mouse e um teclado para vários computadores, no Windows e no Linux.
 É a mesma ideia do [Deskflow](https://github.com/deskflow/deskflow): você leva o cursor
 até a borda da tela e ele "passa" para o outro PC, junto com o teclado e a área de
-transferência (texto).
+transferência (texto e imagens).
 
 Foi escrito do zero em Python: não usa código do Deskflow.
 
@@ -33,7 +33,7 @@ Os instaladores ficam na pasta `dist/` e já trazem tudo de que o programa preci
 
 ### Windows
 
-1. Dê dois cliques em **`MultiDesk-Setup-0.2.1.exe`** e avance o assistente.
+1. Dê dois cliques em **`MultiDesk-Setup-0.3.0.exe`** e avance o assistente.
    Não pede senha de administrador.
 2. O MultiDesk aparece no Menu Iniciar (e na área de trabalho, se você marcar a opção).
 3. Para remover: *Configurações → Aplicativos → MultiDesk → Desinstalar*.
@@ -47,8 +47,8 @@ o programa: permita em **redes privadas**.
 
 ### Linux (Ubuntu, Debian, Mint, Pop!_OS, Zorin...)
 
-1. Dê dois cliques em **`multidesk_0.2.1_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
-   Pelo terminal: `sudo apt install ./multidesk_0.2.1_all.deb` (use `apt`, não `dpkg -i`:
+1. Dê dois cliques em **`multidesk_0.3.0_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
+   Pelo terminal: `sudo apt install ./multidesk_0.3.0_all.deb` (use `apt`, não `dpkg -i`:
    só o `apt` baixa as dependências).
 2. **Reinicie o computador** (ou saia e entre na sessão) na primeira instalação, para liberar
    o teclado/mouse virtuais.
@@ -108,7 +108,7 @@ Opções úteis: `--port`, `--code`, `--name`, `--no-clipboard`, `-v` (log detal
 
 ## Limitações conhecidas
 
-- Área de transferência: só texto, sem arquivos nem imagens.
+- Área de transferência: texto e imagens (até 16 MB); arquivos copiados no Explorer/gerenciador de arquivos não são enviados.
 - Windows: o cliente não consegue controlar janelas abertas **como administrador**
   (por exemplo o Gerenciador de Tarefas), a menos que o MultiDesk também rode como administrador.
   Ctrl+Alt+Del não pode ser repassado.
@@ -140,6 +140,6 @@ use `iniciar.bat` (Windows) ou `iniciar.sh` (Linux).
 | `multidesk/platform/linux.py` | Captura no X11 (RECORD/XGrab); simulação via uinput ou XTest |
 | `multidesk/platform/uinput.py` | Teclado e mouse virtuais do kernel (Wayland e X11) |
 | `multidesk/keymap.py` | Tradução de teclas físicas: scan code do Windows ↔ evdev do Linux |
-| `multidesk/clipboard.py` | Sincroniza a área de transferência |
+| `multidesk/clipboard.py` | Área de transferência compartilhada: texto e imagens, nos dois sentidos |
 | `multidesk/gui.py` | A janela (customtkinter) |
 | `multidesk/tray.py` | Ícone na bandeja do sistema (pystray) |

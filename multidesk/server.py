@@ -12,7 +12,7 @@ import threading
 import time
 
 from . import platform
-from .clipboard import ClipboardSync
+from .clipboard import ClipboardSync, clip_message, parse_clip
 from .crypto import AuthError, handshake
 from .link import DEFAULT_PORT, local_ip, make_link, new_code
 
@@ -78,7 +78,7 @@ class Remote:
                 msg = self.chan.recv()
                 t = msg.get("t")
                 if t == "clip":
-                    self.server._clip_from(self, msg.get("text"))
+                    self.server._clip_from(self, msg)
                 elif t == "ping":
                     self.send({"t": "pong", "ts": msg.get("ts")})
                 elif t == "pong" and isinstance(msg.get("ts"), (int, float)):
@@ -210,26 +210,32 @@ class Server:
         with self._lock:
             if self.remotes.get(remote.side) is not remote:
                 return
-            del self.remotes[remote.side]
+            # Primeiro devolve o controle, depois tira da lista: quem lê sem a
+            # trava (a janela) nunca vê "nenhum PC" com um PC ainda no controle.
             if self.active is remote:
                 log.warning("%s caiu enquanto estava no controle; voltando para cá", remote.name)
                 self._leave(self._local_center())
+            del self.remotes[remote.side]
         remote.close()
         log.info("%s desconectou", remote.name)
         self.on_change()
 
     # ---- área de transferência ------------------------------------------
 
-    def _clip_local(self, text):
+    def _clip_local(self, kind, data):
+        msg = clip_message(kind, data)
         for r in list(self.remotes.values()):
-            r.send({"t": "clip", "text": text})
+            r.send(msg)
 
-    def _clip_from(self, origin, text):
+    def _clip_from(self, origin, msg):
+        content = parse_clip(msg)
+        if not content:
+            return
         if self.clipboard:
-            self.clipboard.set(text)
-        for r in list(self.remotes.values()):
+            self.clipboard.set(*content)
+        for r in list(self.remotes.values()):  # repassa para os outros clientes
             if r is not origin:
-                r.send({"t": "clip", "text": text})
+                r.send(clip_message(*content))
 
     # ---- entrada (chamado pelos hooks) ----------------------------------
 

@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from .link import normalize_code
 
 MAGIC = b"MDSK1"
-MAX_FRAME = 4 * 1024 * 1024
+MAX_FRAME = 32 * 1024 * 1024  # cabe uma imagem de 16 MB em base64
 
 
 class AuthError(Exception):

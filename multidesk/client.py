@@ -6,7 +6,7 @@ import threading
 import time
 
 from . import platform
-from .clipboard import ClipboardSync
+from .clipboard import ClipboardSync, clip_message, parse_clip
 from .crypto import AuthError, handshake
 from .link import parse_link
 
@@ -128,7 +128,9 @@ class Client:
             elif t == "leave":
                 inj.release_all()
             elif t == "clip" and self.clipboard:
-                self.clipboard.set(msg.get("text"))
+                content = parse_clip(msg)
+                if content:  # em outra thread: colar uma imagem não atrasa o mouse
+                    threading.Thread(target=self.clipboard.set, args=content, daemon=True).start()
             elif t == "ping":
                 self._chan.send({"t": "pong", "ts": msg.get("ts")})
             elif t == "pong" and isinstance(msg.get("ts"), (int, float)):
@@ -137,11 +139,11 @@ class Client:
         except Exception:
             log.exception("erro executando %s", t)
 
-    def _clip_local(self, text):
+    def _clip_local(self, kind, data):
         chan = self._chan
         if chan and self.connected:
             try:
-                chan.send({"t": "clip", "text": text})
+                chan.send(clip_message(kind, data))
             except OSError:
                 pass
 
