@@ -22,6 +22,19 @@ SIDES = ("right", "left", "top", "bottom")
 SIDE_PT = {"right": "direita", "left": "esquerda", "top": "acima", "bottom": "abaixo"}
 PING_INTERVAL = 1.0
 TIMEOUT = 10.0
+MOVE_INTERVAL = 1 / 250  # no máximo 250 posições do cursor por segundo
+
+
+def _coalesce_moves(msgs):
+    """Troca cada sequência de 'move' seguidos só pelo último (mantém a ordem
+    em relação a cliques e teclas)."""
+    out = []
+    for m in msgs:
+        if out and m.get("t") == "move" and out[-1].get("t") == "move":
+            out[-1] = m
+        else:
+            out.append(m)
+    return out
 
 
 class Remote:
@@ -52,9 +65,21 @@ class Remote:
             self._q.put(None)
             self.chan.close()
 
+    def _drain(self, batch):
+        while True:
+            try:
+                batch.append(self._q.get_nowait())
+            except queue.Empty:
+                return
+
     def _writer(self):
         # Fila + thread própria: o hook de entrada nunca espera pela rede.
+        # Um mouse manda até 1000 eventos/s; mandar cada um num pacote enche a
+        # rede (principalmente Wi-Fi) e cria fila, que aparece como lag e ping
+        # alto. Então movimentos seguidos viram um só (vale a última posição)
+        # e saem no máximo a cada MOVE_INTERVAL.
         next_ping = 0.0
+        last_move = 0.0
         try:
             while self.alive:
                 now = time.monotonic()
@@ -65,9 +90,23 @@ class Remote:
                     msg = self._q.get(timeout=max(next_ping - now, 0.01))
                 except queue.Empty:
                     continue
-                if msg is None:
+                batch = [msg]
+                self._drain(batch)
+                if all(m is not None and m.get("t") == "move" for m in batch):
+                    wait = last_move + MOVE_INTERVAL - time.monotonic()
+                    if wait > 0:
+                        time.sleep(wait)
+                        self._drain(batch)
+                stop = None in batch
+                if stop:
+                    batch = batch[:batch.index(None)]
+                out = _coalesce_moves(batch)
+                if out:
+                    self.chan.send_many(out)
+                    if out[-1].get("t") == "move":
+                        last_move = time.monotonic()
+                if stop:
                     break
-                self.chan.send(msg)
         except OSError:
             pass
         self.server._drop(self)
@@ -80,7 +119,9 @@ class Remote:
                 if t == "clip":
                     self.server._clip_from(self, msg)
                 elif t == "ping":
-                    self.send({"t": "pong", "ts": msg.get("ts")})
+                    # Direto, sem passar pela fila: senão o ping mede a fila
+                    # de movimentos em vez da rede.
+                    self.chan.send({"t": "pong", "ts": msg.get("ts")})
                 elif t == "pong" and isinstance(msg.get("ts"), (int, float)):
                     self.rtt = (time.monotonic() - msg["ts"]) * 1000
                     self.server.on_change()

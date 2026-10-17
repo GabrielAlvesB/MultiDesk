@@ -54,12 +54,19 @@ class SecureChannel:
         self._send_lock = threading.Lock()
 
     def send(self, msg):
-        data = json.dumps(msg, separators=(",", ":")).encode()
+        self.send_many((msg,))
+
+    def send_many(self, msgs):
+        """Várias mensagens num único sendall (um pacote só na rede)."""
+        datas = [json.dumps(m, separators=(",", ":")).encode() for m in msgs]
         with self._send_lock:
-            nonce = self._send_ctr.to_bytes(12, "big")
-            self._send_ctr += 1
-            ct = self._send.encrypt(nonce, data, None)
-            self.sock.sendall(struct.pack(">I", len(ct)) + ct)
+            frames = []
+            for data in datas:
+                nonce = self._send_ctr.to_bytes(12, "big")
+                self._send_ctr += 1
+                ct = self._send.encrypt(nonce, data, None)
+                frames.append(struct.pack(">I", len(ct)) + ct)
+            self.sock.sendall(b"".join(frames))
 
     def recv(self):
         (size,) = struct.unpack(">I", _recv_exact(self.sock, 4))
