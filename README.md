@@ -33,7 +33,7 @@ Os instaladores ficam na pasta `dist/` e já trazem tudo de que o programa preci
 
 ### Windows
 
-1. Dê dois cliques em **`MultiDesk-Setup-0.3.0.exe`** e avance o assistente.
+1. Dê dois cliques em **`MultiDesk-Setup-0.4.0.exe`** e avance o assistente.
    Não pede senha de administrador.
 2. O MultiDesk aparece no Menu Iniciar (e na área de trabalho, se você marcar a opção).
 3. Para remover: *Configurações → Aplicativos → MultiDesk → Desinstalar*.
@@ -47,21 +47,53 @@ o programa: permita em **redes privadas**.
 
 ### Linux (Ubuntu, Debian, Mint, Pop!_OS, Zorin...)
 
-1. Dê dois cliques em **`multidesk_0.3.0_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
-   Pelo terminal: `sudo apt install ./multidesk_0.3.0_all.deb` (use `apt`, não `dpkg -i`:
+1. Dê dois cliques em **`multidesk_0.4.0_all.deb`**. Ele abre na loja de aplicativos: clique em **Instalar**.
+   Pelo terminal: `sudo apt install ./multidesk_0.4.0_all.deb` (use `apt`, não `dpkg -i`:
    só o `apt` baixa as dependências).
 2. **Reinicie o computador** (ou saia e entre na sessão) na primeira instalação, para liberar
    o teclado/mouse virtuais.
 3. O MultiDesk aparece no menu de aplicativos.
 4. Para remover: pela loja de aplicativos, ou `sudo apt remove multidesk`.
 
-**Wayland ou X11?** Para ser **controlado** (cliente), o Linux funciona nos dois: o MultiDesk
-cria um teclado e um mouse virtuais no kernel (`/dev/uinput`), como se fossem USB.
-Para **controlar** os outros (servidor), o Linux precisa de sessão **X11**, porque o Wayland
-não deixa programas capturarem o mouse e o teclado. Na tela de login, clique na engrenagem e
-escolha **"Ubuntu on Xorg"** (ou "GNOME on Xorg" / "Plasma (X11)").
+### Linux (Arch, CachyOS, EndeavourOS, Manjaro, Garuda...)
 
-Se o servidor for Linux e usar firewall: `sudo ufw allow 24850/tcp`.
+1. No terminal, na pasta do arquivo:
+   `sudo pacman -U multidesk-0.4.0-1-any.pkg.tar.zst` (o `pacman` baixa as dependências sozinho).
+2. **Reinicie o computador** (ou saia e entre na sessão) na primeira instalação, para liberar
+   o teclado/mouse virtuais.
+3. O MultiDesk aparece no menu de aplicativos (ou rode `multidesk`).
+4. Para remover: `sudo pacman -R multidesk`.
+
+Também dá para gerar o pacote no próprio Arch, a partir do código: `cd packaging/arch && makepkg -si`.
+
+### Wayland ou X11? E cada ambiente gráfico
+
+Para ser **controlado** (cliente), o Linux funciona em **qualquer** ambiente, Wayland ou X11:
+o MultiDesk cria um teclado e um mouse virtuais no kernel (`/dev/uinput`), como se fossem USB,
+e pergunta o tamanho dos monitores direto ao compositor.
+
+Para **controlar** os outros (servidor), o Linux precisa de sessão **X11**, porque o Wayland
+não deixa programas capturarem o mouse e o teclado. Na tela de login, escolha uma sessão X11.
+
+| Ambiente (ex.: edições do CachyOS) | Ser controlado (cliente) | Controlar (servidor) |
+|---|---|---|
+| KDE Plasma | ✅ | Com a sessão **Plasma (X11)** (no Arch: `sudo pacman -S plasma-x11-session`) |
+| GNOME | ✅ | Só em versões que ainda têm "GNOME on Xorg" (o GNOME 49+ removeu) |
+| Xfce, Cinnamon, MATE, LXQt, LXDE, Budgie, i3, Openbox, Qtile (X11) | ✅ | ✅ |
+| Hyprland, niri, Sway, Wayfire, COSMIC | ✅ | ❌ (só existem em Wayland) |
+
+Detalhes por ambiente:
+
+- **Área de transferência**: no KDE, Hyprland, Sway, niri e COSMIC usa o `wl-clipboard`;
+  no GNOME e no X11 usa o `xclip`. O MultiDesk escolhe sozinho.
+- **niri**: a janela do MultiDesk precisa do XWayland, que no niri vem pelo
+  `xwayland-satellite` (`sudo pacman -S xwayland-satellite`). Sem ele, o modo cliente funciona
+  pela linha de comando (`multidesk client <link>`).
+- **Ícone na bandeja** no Hyprland, Sway e niri: aparece se a sua barra tiver bandeja
+  (no Waybar, o módulo `tray`).
+
+Se o servidor for Linux e usar firewall: `sudo ufw allow 24850/tcp`
+(no CachyOS/Arch com firewalld: `sudo firewall-cmd --permanent --add-port=24850/tcp && sudo firewall-cmd --reload`).
 
 ### Segundo plano e iniciar com o sistema
 
@@ -75,9 +107,14 @@ janela sempre encerra o MultiDesk (ele nunca fica rodando escondido).
 Ligue **"Iniciar com o sistema"** na janela para que, ao ligar o computador, o MultiDesk abra
 direto na bandeja e já comece no modo que você usou por último (servidor ou cliente).
 
-> Linux: o ícone usa AppIndicator. O Ubuntu já vem com isso; no GNOME "puro" (Fedora,
-> Debian) instale a extensão *AppIndicator and KStatusNotifierItem Support*. Sem ela o
+> Linux: o ícone usa AppIndicator. O Ubuntu e o KDE já vêm com isso; no GNOME "puro" (Fedora,
+> Debian, Arch, CachyOS) instale a extensão *AppIndicator and KStatusNotifierItem Support*. Sem ela o
 > MultiDesk roda em segundo plano do mesmo jeito: abra pelo menu de aplicativos para ver a janela.
+>
+> "Iniciar com o sistema" usa o `~/.config/autostart`, que KDE, GNOME, Xfce, Cinnamon, MATE,
+> LXQt, Budgie e COSMIC seguem. Hyprland, Sway, i3 e niri não leem essa pasta: adicione na
+> configuração deles `exec-once = multidesk --autostart` (Hyprland),
+> `exec multidesk --autostart` (Sway/i3) ou `spawn-at-startup "multidesk" "--autostart"` (niri).
 
 O log fica em `%LOCALAPPDATA%\MultiDesk\multidesk.log` (Windows) ou
 `~/.local/state/multidesk/multidesk.log` (Linux).
@@ -112,7 +149,7 @@ Opções úteis: `--port`, `--code`, `--name`, `--no-clipboard`, `-v` (log detal
 - Windows: o cliente não consegue controlar janelas abertas **como administrador**
   (por exemplo o Gerenciador de Tarefas), a menos que o MultiDesk também rode como administrador.
   Ctrl+Alt+Del não pode ser repassado.
-- Linux como servidor: só X11 (veja acima). Como cliente funciona no Wayland e no X11.
+- Linux como servidor: só X11 (veja a tabela acima). Como cliente funciona em qualquer ambiente, Wayland ou X11.
 - Os clientes ficam encostados no servidor: não dá para ir de um cliente direto para outro.
 - Os dois PCs precisam estar na mesma rede, ou alcançáveis pelo IP do link (VPN como Tailscale/ZeroTier serve).
 
@@ -122,8 +159,9 @@ Opções úteis: `--port`, `--code`, `--name`, `--no-clipboard`, `-v` (log detal
 # Windows -> dist\installer\MultiDesk-Setup-<versão>.exe  (precisa do Inno Setup 6)
 powershell -ExecutionPolicy Bypass -File build_windows.ps1
 
-# Linux -> dist/multidesk_<versão>_all.deb  (roda em qualquer sistema, inclusive Windows)
-python tools/build_deb.py
+# Linux (rodam em qualquer sistema, inclusive Windows)
+python tools/build_deb.py    # -> dist/multidesk_<versão>_all.deb             (Debian/Ubuntu)
+python tools/build_arch.py   # -> dist/multidesk-<versão>-1-any.pkg.tar.zst   (Arch/CachyOS)
 ```
 
 A versão fica em `multidesk/__init__.py`. Para rodar direto do código-fonte, sem instalar,
@@ -139,7 +177,10 @@ use `iniciar.bat` (Windows) ou `iniciar.sh` (Linux).
 | `multidesk/platform/windows.py` | Hooks de baixo nível e SendInput |
 | `multidesk/platform/linux.py` | Captura no X11 (RECORD/XGrab); simulação via uinput ou XTest |
 | `multidesk/platform/uinput.py` | Teclado e mouse virtuais do kernel (Wayland e X11) |
+| `multidesk/platform/wayland.py` | Pergunta os monitores direto ao compositor Wayland (protocolo xdg-output) |
 | `multidesk/keymap.py` | Tradução de teclas físicas: scan code do Windows ↔ evdev do Linux |
 | `multidesk/clipboard.py` | Área de transferência compartilhada: texto e imagens, nos dois sentidos |
 | `multidesk/gui.py` | A janela (customtkinter) |
 | `multidesk/tray.py` | Ícone na bandeja do sistema (pystray) |
+| `tools/linux_payload.py` | Arquivos instalados no Linux, comuns ao .deb e ao pacote do Arch |
+| `packaging/arch/` | `PKGBUILD` e script de instalação do pacote do Arch |

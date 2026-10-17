@@ -5,8 +5,10 @@ ler o conteúdo atual e escrever um conteúdo novo.
 
   Windows: API do sistema via ctypes; mudança pelo GetClipboardSequenceNumber.
            Imagens em "PNG" (mantém transparência) e CF_DIB (todos os apps).
-  Linux:   xclip (X11, e Wayland via XWayland: GNOME/KDE espelham a área de
-           transferência). Mudança por evento XFixes; sem ele, consulta periódica.
+  Linux:   wl-clipboard nos compositores Wayland com "data-control" (KDE,
+           Hyprland, Sway, niri, COSMIC...): mudança avisada pelo wl-paste --watch.
+           Nos outros (X11, e GNOME via XWayland, que espelha a área de
+           transferência): xclip, com mudança por evento XFixes ou consulta periódica.
 
 O conteúdo viaja como ("text", str) ou ("image", bytes PNG).
 """
@@ -15,6 +17,7 @@ import base64
 import hashlib
 import io
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -189,12 +192,80 @@ if sys.platform == "win32":
 else:
     _IMAGE_TYPES = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/webp", "image/tiff")
 
-    class _Backend:
+    def _image_to_png(target, data):
+        if target == "image/png":
+            return data
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            return to_png(im)
+
+    def _die_with_parent():
+        """O wl-paste --watch não sai sozinho: morre junto com o MultiDesk."""
+        try:
+            import ctypes
+            import signal
+            ctypes.CDLL(None).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+        except Exception:
+            pass
+
+    class _WlClipboard:
+        name = "Linux (wl-clipboard)"
+
+        def __init__(self):
+            self._event = threading.Event()
+            # Roda "echo" a cada mudança: cada linha na saída é um aviso.
+            self._proc = subprocess.Popen(["wl-paste", "--watch", "echo", "."], stdin=subprocess.DEVNULL,
+                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                          preexec_fn=_die_with_parent)
+            time.sleep(0.3)
+            if self._proc.poll() is not None:
+                raise OSError("wl-paste --watch não funciona neste compositor")
+            threading.Thread(target=self._watch, name="clip-wl", daemon=True).start()
+
+        def _watch(self):
+            for _ in self._proc.stdout:
+                self._event.set()
+            log.debug("wl-paste --watch terminou")
+
+        def changed(self):
+            if self._event.is_set():
+                self._event.clear()
+                return True
+            return False
+
+        @staticmethod
+        def _paste(*args, timeout=3):
+            r = subprocess.run(["wl-paste", "--no-newline", *args], stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=timeout)
+            return r.stdout if r.returncode == 0 else None
+
+        def read(self):
+            types = (self._paste("--list-types") or b"").decode(errors="ignore").splitlines()
+            for t in _IMAGE_TYPES:
+                if t in types:
+                    data = self._paste("--type", t, timeout=10)
+                    if data:
+                        return "image", _image_to_png(t, data)
+            for t in ("text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"):
+                if t in types:
+                    data = self._paste("--type", t)
+                    if data:
+                        return "text", data.decode("utf-8", errors="replace")
+            return None
+
+        def write(self, kind, data):
+            target, payload = ("text/plain;charset=utf-8", data.encode("utf-8")) if kind == "text" else ("image/png", data)
+            # O wl-copy fica em segundo plano servindo o conteúdo até alguém copiar outra coisa.
+            subprocess.run(["wl-copy", "--type", target], input=payload,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=True)
+
+        def close(self):
+            self._proc.terminate()
+
+    class _XClipboard:
         name = "Linux (xclip)"
 
         def __init__(self):
-            if not shutil.which("xclip"):
-                raise OSError("xclip não instalado (sudo apt install xclip)")
             self._event = threading.Event()
             self._events_ok = self._watch_xfixes()
             self._last_poll = 0.0
@@ -251,11 +322,7 @@ else:
                 if t in targets:
                     data = self._xclip_out(t, timeout=10)
                     if data:
-                        if t != "image/png":
-                            from PIL import Image
-                            with Image.open(io.BytesIO(data)) as im:
-                                data = to_png(im)
-                        return "image", data
+                        return "image", _image_to_png(t, data)
             for t in ("UTF8_STRING", "text/plain;charset=utf-8", "STRING", "TEXT"):
                 if t in targets:
                     data = self._xclip_out(t)
@@ -269,6 +336,31 @@ else:
             # alguém copiar outra coisa; por isso a saída vai para DEVNULL.
             subprocess.run(["xclip", "-selection", "clipboard", "-t", target, "-i"], input=payload,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=True)
+
+    def _Backend():
+        """wl-clipboard se o compositor deixa ler a área de transferência sem
+        janela em foco (protocolo data-control); senão xclip pelo X/XWayland."""
+        why = []
+        if os.environ.get("WAYLAND_DISPLAY"):
+            if shutil.which("wl-paste") and shutil.which("wl-copy"):
+                try:
+                    from .platform import wayland
+                    if wayland.interfaces() & {"zwlr_data_control_manager_v1", "ext_data_control_manager_v1"}:
+                        return _WlClipboard()
+                    why.append("o compositor não oferece data-control para o wl-clipboard")
+                except Exception as e:
+                    why.append(f"wl-clipboard: {e}")
+            else:
+                why.append("wl-clipboard não instalado")
+        if not os.environ.get("DISPLAY"):
+            why.append("sem X/XWayland para o xclip")
+        elif not shutil.which("xclip"):
+            why.append("xclip não instalado")
+        else:
+            if why:
+                log.debug("usando xclip: %s", "; ".join(why))
+            return _XClipboard()
+        raise OSError("; ".join(why) + " (instale o pacote xclip, e também wl-clipboard no Wayland)")
 
 
 # --------------------------------------------------------------------------
@@ -301,10 +393,16 @@ class ClipboardSync:
         except Exception:
             pass
         threading.Thread(target=self._loop, name="clipboard", daemon=True).start()
-        log.info("Área de transferência compartilhada (texto e imagens)")
+        log.info("Área de transferência compartilhada (texto e imagens): %s", self._backend.name)
 
     def stop(self):
         self._stop.set()
+        close = getattr(self._backend, "close", None)
+        if close:
+            try:
+                close()
+            except Exception:
+                pass
 
     def set(self, kind, data):
         """Conteúdo que chegou do outro computador."""

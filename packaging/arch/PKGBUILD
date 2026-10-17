@@ -1,0 +1,33 @@
+# Gera o pacote no próprio Arch/CachyOS a partir deste repositório:
+#   cd packaging/arch && makepkg -si
+# (Alternativa sem makepkg: `python tools/build_arch.py` em qualquer sistema.)
+
+pkgname=multidesk
+pkgver=0.4.0
+pkgrel=1
+pkgdesc="Um mouse e um teclado para vários computadores (Windows e Linux)"
+arch=(any)
+url="https://github.com/GabrielAlvesB/MultiDesk"
+license=(LicenseRef-custom)
+depends=(python python-xlib python-cryptography tk python-pillow xclip wl-clipboard
+         xorg-xwayland python-gobject libayatana-appindicator)
+optdepends=('xwayland-satellite: abrir a janela do MultiDesk no niri')
+makedepends=(python-pip)
+install=multidesk.install
+
+_repo="$startdir/../.."
+
+pkgver() {
+    sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' "$_repo/multidesk/__init__.py"
+}
+
+build() {
+    # Bibliotecas que não existem nos repositórios oficiais (todas Python puro):
+    # vão junto no pacote, em /usr/lib/multidesk/vendor.
+    python -m venv "$srcdir/venv"
+    "$srcdir/venv/bin/pip" install -q --no-deps pynput six customtkinter darkdetect packaging pystray
+}
+
+package() {
+    "$srcdir/venv/bin/python" "$_repo/tools/build_arch.py" --root "$pkgdir"
+}

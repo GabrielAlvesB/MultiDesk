@@ -6,6 +6,10 @@ Se o uinput não estiver acessível, cai para XTest, que só funciona no X11.
 
 Servidor (controlar os outros): RECORD via pynput + grab do X. Precisa de
 sessão X11, pois o Wayland não deixa programas comuns capturarem a entrada.
+
+Nada aqui depende da distribuição (Debian/Ubuntu, Arch/CachyOS, Fedora...) nem
+do ambiente gráfico: no Wayland o tamanho da tela vem do próprio compositor,
+e o X só é usado quando existe (XWayland ou sessão X11).
 """
 
 import logging
@@ -17,7 +21,6 @@ import Xlib.display
 import Xlib.ext.xtest
 import Xlib.XK
 from Xlib import X
-from pynput import keyboard, mouse
 
 from . import uinput
 
@@ -25,11 +28,20 @@ log = logging.getLogger("multidesk.linux")
 
 OS = "linux"
 
-_BUTTON_NAMES = {
-    mouse.Button.left: "left", mouse.Button.right: "right", mouse.Button.middle: "middle",
-    getattr(mouse.Button, "button8"): "x1", getattr(mouse.Button, "button9"): "x2",
-}
-_BUTTONS = {v: k for k, v in _BUTTON_NAMES.items()}
+# O pynput se conecta ao X já no import. Num compositor Wayland sem XWayland
+# (niri sem xwayland-satellite, por exemplo) isso falha; o cliente funciona
+# assim mesmo pelo uinput, só o servidor e o XTest precisam dele.
+try:
+    from pynput import keyboard, mouse
+    _BUTTON_NAMES = {
+        mouse.Button.left: "left", mouse.Button.right: "right", mouse.Button.middle: "middle",
+        getattr(mouse.Button, "button8"): "x1", getattr(mouse.Button, "button9"): "x2",
+    }
+    _BUTTONS = {v: k for k, v in _BUTTON_NAMES.items()}
+except Exception as _e:  # pragma: no cover - depende da sessão
+    keyboard = mouse = None
+    _BUTTON_NAMES, _BUTTONS = {}, {}
+    _NO_X = _e
 
 # Caracteres que no Linux costumam ficar em teclas mortas (teclado ABNT2 etc.).
 _DEAD_KEYSYMS = {
@@ -42,11 +54,28 @@ def is_wayland():
     return os.environ.get("XDG_SESSION_TYPE") == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
+def desktop_name():
+    return os.environ.get("XDG_CURRENT_DESKTOP") or os.environ.get("DESKTOP_SESSION") or "?"
+
+
 def init_process():
-    log.info("Sessão gráfica: %s", "Wayland" if is_wayland() else "X11")
+    log.info("Sessão gráfica: %s (%s)", "Wayland" if is_wayland() else "X11", desktop_name())
+
+
+def _require_x(what):
+    if keyboard is None:
+        raise RuntimeError(f"{what} precisa do X (sessão X11 ou XWayland), que não está disponível: {_NO_X}")
 
 
 def screen_bounds():
+    if os.environ.get("WAYLAND_DISPLAY"):
+        try:
+            from . import wayland
+            bounds = wayland.desktop_bounds()
+            if bounds:
+                return bounds
+        except Exception as e:
+            log.debug("monitores pelo Wayland: %s", e)
     d = Xlib.display.Display()
     try:
         s = d.screen()
@@ -65,13 +94,16 @@ def key_desc(key, x_keycode=None):
     return desc
 
 
-class _KeyListener(keyboard.Listener):
+def _key_listener(**callbacks):
     """Listener do pynput que também guarda o keycode X (tecla física)."""
-    last_keycode = None
+    class _KeyListener(keyboard.Listener):
+        last_keycode = None
 
-    def _handle_message(self, display, event, injected):
-        self.last_keycode = event.detail
-        super()._handle_message(display, event, injected)
+        def _handle_message(self, display, event, injected):
+            self.last_keycode = event.detail
+            super()._handle_message(display, event, injected)
+
+    return _KeyListener(**callbacks)
 
 
 def char_to_keysym(ch):
@@ -144,15 +176,18 @@ class Capture:
         self.sink = sink
         self.remote = False
         if is_wayland():
-            log.error("Este PC está numa sessão Wayland: como SERVIDOR o MultiDesk não consegue "
-                      "capturar o mouse/teclado. Use 'Ubuntu on Xorg' no login, ou deixe este PC como cliente.")
+            log.error("Este PC está numa sessão Wayland (%s): como SERVIDOR o MultiDesk não consegue "
+                      "capturar o mouse/teclado. Escolha uma sessão X11 na tela de login (ex.: "
+                      "'Plasma (X11)', 'GNOME on Xorg', Xfce, i3), ou deixe este PC como cliente.",
+                      desktop_name())
+        _require_x("O modo servidor")
         self._grabber = _Grabber()
         _, _, w, h = screen_bounds()
         self._limit = (w // 4, h // 4)
         self._center = (w // 2, h // 2)
         self._last = self._center
         self._ml = mouse.Listener(on_move=self._on_move, on_click=self._on_click, on_scroll=self._on_scroll)
-        self._kl = _KeyListener(on_press=self._on_press, on_release=self._on_release)
+        self._kl = _key_listener(on_press=self._on_press, on_release=self._on_release)
 
     def start(self):
         self._ml.start()
@@ -235,8 +270,9 @@ class Injector:
             self._kbd = self._ptr = None
             log.warning("Sem acesso ao /dev/uinput (%s); usando XTest.", e)
             if is_wayland():
-                log.error("No Wayland o XTest só alcança alguns programas. Reinstale o pacote .deb "
-                          "e reinicie a sessão (ou o PC) para liberar o /dev/uinput.")
+                log.error("No Wayland o XTest só alcança alguns programas. Reinstale o pacote "
+                          "(.deb ou pacman) e reinicie a sessão (ou o PC) para liberar o /dev/uinput.")
+            _require_x("Simular mouse/teclado sem o /dev/uinput")
             self._x = _XInjector()
 
     def move(self, x, y):

@@ -2,3 +2,4 @@
 *.sh text eol=lf
 *.png binary
 *.ico binary
+packaging/arch/* text eol=lf

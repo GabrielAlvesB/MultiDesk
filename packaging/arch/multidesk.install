@@ -1,0 +1,11 @@
+post_install() {
+    # Libera o /dev/uinput (teclado/mouse virtuais) sem precisar reiniciar.
+    modprobe uinput 2>/dev/null || true
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=change 2>/dev/null || true
+    echo "MultiDesk: se for a primeira instalação, saia e entre de novo na sessão (ou reinicie)."
+}
+
+post_upgrade() {
+    post_install
+}

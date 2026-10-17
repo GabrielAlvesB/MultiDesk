@@ -1,8 +1,8 @@
 """Dispositivos virtuais de entrada do kernel Linux (/dev/uinput), sem dependências.
 
 É o mesmo caminho que um mouse/teclado USB de verdade: funciona no Wayland
-(GNOME, KDE...), no X11 e até no console. O pacote .deb instala uma regra
-udev que dá acesso ao /dev/uinput para o usuário logado.
+(GNOME, KDE, Hyprland, Sway, niri...), no X11 e até no console. Os pacotes
+(.deb e pacman) instalam uma regra udev que dá acesso ao /dev/uinput para o usuário logado.
 """
 
 import fcntl
