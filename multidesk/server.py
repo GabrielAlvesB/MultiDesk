@@ -26,6 +26,7 @@ PING_INTERVAL = 0.5
 PING_SAMPLES = 5  # o ping mostrado é a mediana das últimas medições
 TIMEOUT = 10.0
 MOVE_INTERVAL = 1 / 250  # no máximo 250 posições do cursor por segundo
+KEEPALIVE = 0.04  # enquanto controla um PC, nunca fica mais que isso sem mandar nada
 
 
 def _coalesce_moves(msgs):
@@ -84,16 +85,29 @@ class Remote:
         # e saem no máximo a cada MOVE_INTERVAL.
         next_ping = 0.0
         last_move = 0.0
+        last_sent = 0.0
         try:
             while self.alive:
                 now = time.monotonic()
+                active = self.server.active is self
                 if now >= next_ping:
                     # Manda junto o ping medido aqui: o cliente mostra este se
                     # não conseguir medir o dele.
                     self.chan.send({"t": "ping", "ts": now, "rtt": self.rtt})
+                    last_sent = now
                     next_ping = now + PING_INTERVAL
+                elif active and now - last_sent >= KEEPALIVE * 0.8:  # a espera pode acordar antes
+                    # O Wi-Fi do outro PC "dorme" entre pacotes para economizar
+                    # bateria, e o próximo clique/movimento espera ele acordar
+                    # (50-100 ms). Enquanto controlamos esse PC, um pacotinho
+                    # a cada KEEPALIVE o mantém acordado.
+                    self.chan.send({"t": "k"})
+                    last_sent = now
+                wait = next_ping - now
+                if active:
+                    wait = min(wait, last_sent + KEEPALIVE - now)
                 try:
-                    msg = self._q.get(timeout=max(next_ping - now, 0.01))
+                    msg = self._q.get(timeout=max(wait, 0.005))
                 except queue.Empty:
                     continue
                 batch = [msg]
@@ -109,8 +123,9 @@ class Remote:
                 out = _coalesce_moves(batch)
                 if out:
                     self.chan.send_many(out)
+                    last_sent = time.monotonic()
                     if out[-1].get("t") == "move":
-                        last_move = time.monotonic()
+                        last_move = last_sent
                 if stop:
                     break
         except OSError:

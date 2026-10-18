@@ -3,7 +3,7 @@
 # (Alternativa sem makepkg: `python tools/build_arch.py` em qualquer sistema.)
 
 pkgname=multidesk
-pkgver=0.5.0
+pkgver=0.5.1
 pkgrel=1
 pkgdesc="Um mouse e um teclado para vários computadores (Windows e Linux)"
 arch=(any)
