@@ -8,10 +8,12 @@ tela do cliente, o controle volta para cá.
 import logging
 import queue
 import socket
+import statistics
 import threading
 import time
+from collections import deque
 
-from . import platform
+from . import platform, wifi
 from .clipboard import ClipboardSync, clip_message, parse_clip
 from .crypto import AuthError, handshake
 from .link import DEFAULT_PORT, local_ip, make_link, new_code
@@ -20,7 +22,8 @@ log = logging.getLogger("multidesk.server")
 
 SIDES = ("right", "left", "top", "bottom")
 SIDE_PT = {"right": "direita", "left": "esquerda", "top": "acima", "bottom": "abaixo"}
-PING_INTERVAL = 1.0
+PING_INTERVAL = 0.5
+PING_SAMPLES = 5  # o ping mostrado é a mediana das últimas medições
 TIMEOUT = 10.0
 MOVE_INTERVAL = 1 / 250  # no máximo 250 posições do cursor por segundo
 
@@ -49,6 +52,7 @@ class Remote:
         self.side = side
         self.alive = True
         self.rtt = None  # ping em ms (ida e volta)
+        self._rtts = deque(maxlen=PING_SAMPLES)
         self._q = queue.Queue()
 
     def start(self):
@@ -84,7 +88,9 @@ class Remote:
             while self.alive:
                 now = time.monotonic()
                 if now >= next_ping:
-                    self.chan.send({"t": "ping", "ts": now})
+                    # Manda junto o ping medido aqui: o cliente mostra este se
+                    # não conseguir medir o dele.
+                    self.chan.send({"t": "ping", "ts": now, "rtt": self.rtt})
                     next_ping = now + PING_INTERVAL
                 try:
                     msg = self._q.get(timeout=max(next_ping - now, 0.01))
@@ -123,7 +129,8 @@ class Remote:
                     # de movimentos em vez da rede.
                     self.chan.send({"t": "pong", "ts": msg.get("ts")})
                 elif t == "pong" and isinstance(msg.get("ts"), (int, float)):
-                    self.rtt = (time.monotonic() - msg["ts"]) * 1000
+                    self._rtts.append((time.monotonic() - msg["ts"]) * 1000)
+                    self.rtt = statistics.median(self._rtts)
                     self.server.on_change()
         except (OSError, ConnectionError, ValueError) as e:
             log.debug("leitura de %s terminou: %s", self.name, e)
@@ -145,6 +152,7 @@ class Server:
         self._lock = threading.RLock()
         self._sock = None
         self._running = False
+        self._wifi = None
         self.bounds = platform.screen_bounds()
         self.capture = platform.Capture(self)
         self.clipboard = ClipboardSync(self._clip_local) if clipboard else None
@@ -161,6 +169,7 @@ class Server:
         self._sock.bind(("0.0.0.0", self.port))
         self._sock.listen()
         self._running = True
+        self._wifi = wifi.low_latency()
         threading.Thread(target=self._accept_loop, name="accept", daemon=True).start()
         self.capture.start()
         if self.clipboard:
@@ -182,6 +191,8 @@ class Server:
             self.clipboard.stop()
         if self._sock:
             self._sock.close()
+        if self._wifi:
+            self._wifi.close()
         log.info("Servidor parado: mouse e teclado não são mais compartilhados")
         self.on_change()
 

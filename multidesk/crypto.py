@@ -52,6 +52,7 @@ class SecureChannel:
         self._send_ctr = 0
         self._recv_ctr = 0
         self._send_lock = threading.Lock()
+        self._buf = bytearray()  # bytes já recebidos e ainda não lidos
 
     def send(self, msg):
         self.send_many((msg,))
@@ -68,11 +69,23 @@ class SecureChannel:
                 frames.append(struct.pack(">I", len(ct)) + ct)
             self.sock.sendall(b"".join(frames))
 
+    def _read(self, n):
+        # Lê em blocos grandes: várias mensagens chegam numa chamada só, em vez
+        # de duas chamadas por mensagem (cada uma disputa a vez no Python).
+        while len(self._buf) < n:
+            chunk = self.sock.recv(max(65536, n - len(self._buf)))
+            if not chunk:
+                raise ConnectionError("conexão fechada")
+            self._buf += chunk
+        data = bytes(self._buf[:n])
+        del self._buf[:n]
+        return data
+
     def recv(self):
-        (size,) = struct.unpack(">I", _recv_exact(self.sock, 4))
+        (size,) = struct.unpack(">I", self._read(4))
         if size > MAX_FRAME:
             raise ConnectionError("quadro grande demais")
-        ct = _recv_exact(self.sock, size)
+        ct = self._read(size)
         nonce = self._recv_ctr.to_bytes(12, "big")
         self._recv_ctr += 1
         return json.loads(self._recv.decrypt(nonce, ct, None))

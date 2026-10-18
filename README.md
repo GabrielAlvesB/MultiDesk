@@ -119,6 +119,15 @@ direto na bandeja e já comece no modo que você usou por último (servidor ou c
 O log fica em `%LOCALAPPDATA%\MultiDesk\multidesk.log` (Windows) ou
 `~/.local/state/multidesk/multidesk.log` (Linux).
 
+### Atualizações
+
+O MultiDesk confere as [Releases](https://github.com/GabrielAlvesB/MultiDesk/releases) ao abrir e
+a cada 6 horas (ou pelo botão **Buscar atualização**, no rodapé). Quando sai uma versão nova,
+aparece uma faixa no topo da janela: **Atualizar** baixa o instalador certo para o sistema,
+confere o SHA-256 publicado pelo GitHub, instala e reabre o MultiDesk, que volta a compartilhar
+ou conectar se estava ativo. No Linux a senha é pedida numa janela (pkexec). Rodando do
+código-fonte, o botão só abre a página da release.
+
 ## Uso pela janela
 
 1. No PC com o mouse/teclado: escolha **Compartilhar este PC**, clique em **Copiar** para copiar
@@ -164,7 +173,10 @@ python tools/build_deb.py    # -> dist/multidesk_<versão>_all.deb             (
 python tools/build_arch.py   # -> dist/multidesk-<versão>-1-any.pkg.tar.zst   (Arch/CachyOS)
 ```
 
-A versão fica em `multidesk/__init__.py`. Para rodar direto do código-fonte, sem instalar,
+A versão fica em `multidesk/__init__.py`. Publique a release com a tag `v<versão>` e os três
+arquivos **com esses nomes exatos**: o atualizador procura por eles (`multidesk/updater.py`).
+
+Para rodar direto do código-fonte, sem instalar,
 use `iniciar.bat` (Windows) ou `iniciar.sh` (Linux).
 
 ## Estrutura

@@ -69,18 +69,23 @@ def cmd_client(args):
 
 def cmd_gui(args):
     from .gui import main
-    main(autostarted=args.autostart)
+    main(autostarted=args.autostart, resume=args.resume)
 
 
 def main(argv=None):
     from . import platform
     platform.init_process()
+    # Por padrão uma thread espera até 5 ms pela vez de rodar no Python, e cada
+    # mensagem passa por várias threads: com o app ocupado (janela, área de
+    # transferência) isso somava ~100 ms ao ping. Com 0,5 ms some.
+    sys.setswitchinterval(0.0005)
 
     p = argparse.ArgumentParser(prog="multidesk",
                                 description="Compartilhe mouse, teclado e área de transferência entre PCs.")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("-v", "--verbose", action="store_true", help="log detalhado")
     p.add_argument("--autostart", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)  # reaberto após atualizar
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("server", help="este PC tem o mouse/teclado e controla os outros")

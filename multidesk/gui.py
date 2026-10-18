@@ -4,14 +4,16 @@ import logging
 import os
 import queue
 import socket
+import subprocess
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import messagebox
 
 import customtkinter as ctk
 
-from . import __version__, autostart
+from . import __version__, autostart, updater
 from .config import load_config, save_config
 from .link import DEFAULT_PORT, local_ip, make_link, new_code
 from .tray import Tray
@@ -35,6 +37,11 @@ MUTED = ("#64748B", "#94A3B8")
 TEXT = ("#0F172A", "#F1F5F9")
 BORDER = ("#E2E8F0", "#374151")
 OK, WARN, BAD, IDLE = "#16A34A", "#D97706", "#DC2626", "#94A3B8"
+
+# Larguras (em pixels lógicos, sem a escala do Windows) em que o layout muda.
+WIDE_ON, WIDE_OFF = 1000, 940  # duas colunas
+NARROW_ON, NARROW_OFF = 600, 620  # botão Iniciar desce para baixo das opções
+UPDATE_EVERY_MS = 6 * 3600 * 1000
 
 
 def ping_color(ms):
@@ -61,6 +68,74 @@ class QueueHandler(logging.Handler):
 
     def emit(self, record):
         self.q.put(self.format(record))
+
+
+class ScrollArea(ctk.CTkFrame):
+    """Área com barra de rolagem vertical que só aparece quando o conteúdo não cabe.
+
+    Quando cabe, o conteúdo (`self.inner`) ocupa toda a altura disponível,
+    então quem usa expand=True continua crescendo com a janela.
+    """
+
+    def __init__(self, master):
+        super().__init__(master, fg_color="transparent")
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, yscrollincrement=24)
+        self.bar = ctk.CTkScrollbar(self, orientation="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.bar.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.inner = ctk.CTkFrame(self.canvas, fg_color=BG, bg_color=BG, corner_radius=0)
+        self._win = self.canvas.create_window(0, 0, window=self.inner, anchor="nw")
+        self._bar_shown = False
+        self._pending = False
+        self.canvas.bind("<Configure>", lambda e: self.refit())
+        self.inner.bind("<Configure>", lambda e: self.refit())
+        # Roda do mouse: Windows/Tk 9 mandam <MouseWheel>; X11 com Tk 8.6, botões 4 e 5.
+        # (bind_all do canvas Tk: o customtkinter não deixa usar nos widgets dele.)
+        self.canvas.bind_all("<MouseWheel>", lambda e: self._wheel(e, -e.delta / 120), add="+")
+        self.canvas.bind_all("<Button-4>", lambda e: self._wheel(e, -1), add="+")
+        self.canvas.bind_all("<Button-5>", lambda e: self._wheel(e, 1), add="+")
+        self.recolor()
+
+    def recolor(self):
+        self.canvas.configure(bg=_mode_color(BG))
+
+    def refit(self):
+        """Recalcula o tamanho do conteúdo (chame após mostrar/esconder algo)."""
+        if not self._pending:
+            self._pending = True
+            self.after_idle(self._fit)
+
+    def _fit(self):
+        self._pending = False
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if cw < 2 or ch < 2:
+            return
+        need = self.inner.winfo_reqheight()
+        h = max(ch, need)
+        self.canvas.itemconfigure(self._win, width=cw, height=h)
+        self.canvas.configure(scrollregion=(0, 0, cw, h))
+        over = need > ch + 1
+        if over != self._bar_shown:
+            self._bar_shown = over
+            if over:
+                self.bar.grid(row=0, column=1, sticky="ns", padx=(0, 2))
+            else:
+                self.bar.grid_remove()
+        if not over:
+            self.canvas.yview_moveto(0)
+
+    def scroll_to_end(self):
+        self.after_idle(lambda: self.canvas.yview_moveto(1))
+
+    def _wheel(self, ev, steps):
+        if not self._bar_shown or not steps:
+            return
+        w = self.winfo_containing(ev.x_root, ev.y_root)
+        if w is None or isinstance(w, tk.Text) or not str(w).startswith(str(self) + "."):
+            return  # fora da área, ou no log (que tem a própria rolagem)
+        self.canvas.yview_scroll(int(steps) or (1 if steps > 0 else -1), "units")
 
 
 class LayoutMap(ctk.CTkFrame):
@@ -101,9 +176,11 @@ class LayoutMap(ctk.CTkFrame):
         w, h = c.winfo_width(), c.winfo_height()
         if w < 50 or h < 50:
             return
-        s = self._scale()
         mh = min(h / 3.6, (w / 3.9) / 1.6)
         mw = mh * 1.6
+        # Texto e cantos crescem junto com os monitores (janela maximizada).
+        s = self._scale()
+        s *= min(max(mh / (70 * s), 1), 2.2)
         gx, gy = mw * 0.18, mh * 0.2
         cx, cy = w / 2, h / 2
         self._hit = {}
@@ -185,18 +262,25 @@ class ModeToggle(ctk.CTkFrame):
 
 
 class App:
-    def __init__(self, root, autostarted=False):
+    def __init__(self, root, autostarted=False, resume=False):
         self.root = root
         self.cfg = load_config()
         self.worker = None  # Server ou Client em execução
         self.ui_q = queue.Queue()  # ações vindas de outras threads
         self.log_q = queue.Queue()
         logging.getLogger().addHandler(QueueHandler(self.log_q))
+        self.restart_cmd = None  # comando para reabrir o app ao sair (depois de atualizar)
+        self.update = None  # updater.Update disponível
+        self._checking = False
+        self._layout = None  # "stack" ou "wide"
+        self._narrow = None
+        self._pad = 20
+        self._resize_job = None
 
         ctk.set_appearance_mode("system")
         root.title("MultiDesk")
         root.geometry("640x700")
-        root.minsize(560, 620)
+        root.minsize(480, 420)
         root.configure(fg_color=BG)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         try:
@@ -215,9 +299,18 @@ class App:
         self._build()
         self.show_mode()
         self.refresh()
+        root.bind("<Configure>", self._on_resize, add="+")
         root.after(100, self.poll)
         root.after(1000, self.tick)
-        if autostarted:
+        root.after(5000, self.auto_check_update)
+        was_running = self.cfg.pop("was_running", False)
+        if resume:
+            # Reaberto pelo atualizador: volta a compartilhar/conectar se estava ativo.
+            save_config(self.cfg)
+            logging.getLogger("multidesk").info("MultiDesk atualizado para a versão %s", __version__)
+            if was_running:
+                root.after(500, self.toggle)
+        elif autostarted:
             # Aberto no login: já começa no modo salvo, discreto. Só some de vez
             # se houver ícone na bandeja; senão fica minimizado na barra de tarefas.
             root.iconify()
@@ -255,23 +348,40 @@ class App:
         self.pill = ctk.CTkLabel(head, text="  Parado  ", corner_radius=12, fg_color=IDLE,
                                  text_color="#FFFFFF", font=ctk.CTkFont(size=12, weight="bold"), height=26)
         self.pill.pack(side="right")
+        self.head = head
 
-        # Escolha do modo
-        self.mode_btn = ModeToggle(root, [("server", "Compartilhar este PC"), ("client", "Ser controlado")],
+        # Faixa "nova versão disponível" (só aparece quando há atualização)
+        self.upd_bar = ctk.CTkFrame(root, fg_color=("#DBEAFE", "#1E3A5F"), corner_radius=10)
+        self.upd_label = ctk.CTkLabel(self.upd_bar, text="", text_color=TEXT, anchor="w",
+                                      font=ctk.CTkFont(size=13, weight="bold"))
+        self.upd_label.pack(side="left", fill="x", expand=True, padx=(14, 8), pady=8)
+        self.upd_btn = ctk.CTkButton(self.upd_bar, text="Atualizar", width=110, height=30, fg_color=ACCENT,
+                                     hover_color=ACCENT_HOVER, font=ctk.CTkFont(size=13, weight="bold"),
+                                     command=self.open_update)
+        self.upd_btn.pack(side="right", padx=8, pady=8)
+
+        # Rodapé: fixo embaixo (empacotado antes do meio para nunca ser espremido)
+        foot = self.foot = ctk.CTkFrame(root, fg_color="transparent")
+        foot.pack(side="bottom", fill="x", padx=20, pady=(10, 14))
+        foot.grid_columnconfigure(0, weight=1)
+
+        # Meio rolável: modo, cartões e log
+        self.scroll = ScrollArea(root)
+        self.scroll.pack(fill="both", expand=True)
+        inner = self.scroll.inner
+        self.mode_btn = ModeToggle(inner, [("server", "Compartilhar este PC"), ("client", "Ser controlado")],
                                    self._mode_changed)
         self.mode_btn.set(self.mode)
         self.mode_btn.pack(fill="x", padx=20, pady=(4, 10))
 
-        self.body = ctk.CTkFrame(root, fg_color="transparent")
+        self.body = ctk.CTkFrame(inner, fg_color="transparent")
         self.body.pack(fill="both", expand=True, padx=20)
         self._build_server(self.body)
         self._build_client(self.body)
+        self._apply_layout("stack")
 
-        # Rodapé
-        foot = self.foot = ctk.CTkFrame(root, fg_color="transparent")
-        foot.pack(fill="x", padx=20, pady=(10, 14))
-        opts = ctk.CTkFrame(foot, fg_color="transparent")
-        opts.pack(side="left")
+        opts = self.foot_opts = ctk.CTkFrame(foot, fg_color="transparent")
+        opts.grid(row=0, column=0, sticky="w")
         row = ctk.CTkFrame(opts, fg_color="transparent")
         row.pack(anchor="w")
         self.auto_var = tk.BooleanVar(value=autostart.is_enabled())
@@ -281,6 +391,10 @@ class App:
                                      border_width=1, border_color=BORDER, text_color=TEXT,
                                      hover_color=BORDER, command=self.toggle_log)
         self.log_btn.pack(side="left", padx=10)
+        self.check_btn = ctk.CTkButton(row, text="Buscar atualização", width=130, height=28,
+                                       fg_color="transparent", border_width=1, border_color=BORDER,
+                                       text_color=TEXT, hover_color=BORDER, command=self.check_update)
+        self.check_btn.pack(side="left")
         row = ctk.CTkFrame(opts, fg_color="transparent")
         row.pack(anchor="w", pady=(6, 0))
         ctk.CTkLabel(row, text="Ao fechar a janela:", font=f_small, text_color=MUTED).pack(side="left")
@@ -291,16 +405,15 @@ class App:
         self.start_btn = ctk.CTkButton(foot, text="Iniciar", width=150, height=40, corner_radius=10,
                                        fg_color=ACCENT, hover_color=ACCENT_HOVER,
                                        font=ctk.CTkFont(size=15, weight="bold"), command=self.toggle)
-        self.start_btn.pack(side="right")
+        self._place_start(narrow=False)
 
-        self.log = ctk.CTkTextbox(root, height=130, font=ctk.CTkFont(family="Consolas", size=11),
+        self.log = ctk.CTkTextbox(inner, height=150, font=ctk.CTkFont(family="Consolas", size=11),
                                   fg_color=CARD, border_width=1, border_color=BORDER, corner_radius=10)
 
     def _build_server(self, parent):
         self.srv = ctk.CTkFrame(parent, fg_color="transparent")
 
-        card = self._card(self.srv, "Link para conectar os outros PCs")
-        card.pack(fill="x")
+        card = self.srv_link_card = self._card(self.srv, "Link para conectar os outros PCs")
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=(2, 6))
         self.link_var = tk.StringVar()
@@ -322,8 +435,7 @@ class App:
         self.regen_btn.pack(side="left")
         self.update_link()
 
-        card = self._card(self.srv, "Seus computadores")
-        card.pack(fill="both", expand=True, pady=(10, 0))
+        card = self.srv_map_card = self._card(self.srv, "Seus computadores")
         self.srv_map = LayoutMap(card)
         self.srv_map.pack(fill="both", expand=True, padx=12)
         self.srv_hint = ctk.CTkLabel(card, text="", text_color=MUTED, font=ctk.CTkFont(size=12))
@@ -332,8 +444,7 @@ class App:
     def _build_client(self, parent):
         self.cli = ctk.CTkFrame(parent, fg_color="transparent")
 
-        card = self._card(self.cli, "Conectar a um servidor")
-        card.pack(fill="x")
+        card = self.cli_join_card = self._card(self.cli, "Conectar a um servidor")
         self.join_entry = ctk.CTkEntry(card, height=36, border_color=BORDER,
                                        placeholder_text="Cole aqui o link: multidesk://...",
                                        font=ctk.CTkFont(family="Consolas", size=13))
@@ -347,8 +458,7 @@ class App:
         self.name_entry = ctk.CTkEntry(row, textvariable=self.name_var, height=28, border_color=BORDER)
         self.name_entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
-        stat = self._card(self.cli)
-        stat.pack(fill="x", pady=(10, 0))
+        stat = self.cli_stat_card = self._card(self.cli)
         inner = ctk.CTkFrame(stat, fg_color="transparent")
         inner.pack(fill="x", padx=16, pady=12)
         left = ctk.CTkFrame(inner, fg_color="transparent")
@@ -365,10 +475,74 @@ class App:
         self.cli_ping.pack(anchor="e")
         ctk.CTkLabel(right, text="ping", text_color=MUTED, font=ctk.CTkFont(size=11)).pack(anchor="e")
 
-        card = self._card(self.cli, "Onde esta tela fica em relação ao servidor?")
-        card.pack(fill="both", expand=True, pady=(10, 0))
+        card = self.cli_map_card = self._card(self.cli, "Onde esta tela fica em relação ao servidor?")
         self.cli_map = LayoutMap(card, on_pick=self.pick_side, height=210, empty_blank=True)
         self.cli_map.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+    # ---- layout responsivo ---------------------------------------------------
+
+    def _apply_layout(self, layout):
+        """'stack': tudo empilhado. 'wide': cartões à esquerda, monitores à direita."""
+        if layout == self._layout:
+            return
+        self._layout = layout
+        wide = layout == "wide"
+        for frame, cards, mp in ((self.srv, (self.srv_link_card,), self.srv_map_card),
+                                 (self.cli, (self.cli_join_card, self.cli_stat_card), self.cli_map_card)):
+            frame.grid_columnconfigure(0, weight=2, uniform="col")
+            frame.grid_columnconfigure(1, weight=3, uniform="col")
+            n = len(cards)
+            for r in range(n + 1):
+                frame.grid_rowconfigure(r, weight=1 if r == n else 0)
+            for i, card in enumerate(cards):
+                card.grid(row=i, column=0, columnspan=1 if wide else 2, sticky="new" if wide else "ew",
+                          pady=(0 if i == 0 else 10, 0))
+            if wide:
+                mp.grid(row=0, column=1, rowspan=n + 1, columnspan=1, sticky="nsew", padx=(14, 0), pady=0)
+            else:
+                mp.grid(row=n, column=0, rowspan=1, columnspan=2, sticky="nsew", padx=0, pady=(10, 0))
+        self.scroll.refit()
+
+    def _place_start(self, narrow):
+        if narrow == self._narrow:
+            return
+        self._narrow = narrow
+        if narrow:
+            self.start_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        else:
+            self.start_btn.grid(row=0, column=1, columnspan=1, sticky="e", pady=0)
+
+    def _ui_scale(self):
+        return self.root.winfo_fpixels("1i") / 96
+
+    def _on_resize(self, ev):
+        if ev.widget is not self.root:
+            return
+        if self._resize_job:
+            self.root.after_cancel(self._resize_job)
+        self._resize_job = self.root.after(80, self._relayout)
+
+    def _relayout(self):
+        self._resize_job = None
+        width = self.root.winfo_width() / self._ui_scale()  # pixels lógicos
+        if width >= WIDE_ON:
+            self._apply_layout("wide")
+        elif width < WIDE_OFF:
+            self._apply_layout("stack")
+        if width < NARROW_ON:
+            self._place_start(True)
+        elif width >= NARROW_OFF:
+            self._place_start(False)
+        # Monitores ultrawide: o conteúdo não encosta nas bordas.
+        pad = int(max(20, (width - 1600) / 2))
+        if pad != self._pad:
+            self._pad = pad
+            for w in (self.head, self.mode_btn, self.body, self.foot):
+                w.pack_configure(padx=pad)
+            for w in (self.log, self.upd_bar):
+                if w.winfo_ismapped():
+                    w.pack_configure(padx=pad)
+        self.scroll.refit()
 
     # ---- ações ------------------------------------------------------------
 
@@ -384,6 +558,7 @@ class App:
         self.srv.pack_forget()
         self.cli.pack_forget()
         (self.srv if self.mode == "server" else self.cli).pack(fill="both", expand=True)
+        self.scroll.refit()
 
     def pick_side(self, side):
         if self.worker:
@@ -412,18 +587,15 @@ class App:
         self.root.after(1500, lambda: self.copy_btn.configure(text="Copiar", fg_color=ACCENT))
 
     def toggle_log(self):
-        # A janela cresce/encolhe junto para o log não espremer o resto.
-        scale = self.root.winfo_fpixels("1i") / 96
-        w = round(self.root.winfo_width() / scale)
-        h = round(self.root.winfo_height() / scale)
+        # O log fica no fim da área rolável: se não couber, aparece a barra de rolagem.
         if self.log.winfo_ismapped():
             self.log.pack_forget()
             self.log_btn.configure(text="Ver log")
-            self.root.geometry(f"{w}x{max(h - 150, 620)}")
         else:
-            self.log.pack(fill="x", padx=20, pady=(0, 4), after=self.foot)
+            self.log.pack(fill="x", padx=self._pad, pady=(10, 4))
             self.log_btn.configure(text="Ocultar log")
-            self.root.geometry(f"{w}x{h + 150}")
+            self.scroll.scroll_to_end()
+        self.scroll.refit()
 
     def toggle_autostart(self):
         try:
@@ -460,6 +632,167 @@ class App:
                         side=self.side, on_change=self.request_refresh)
         client.start()
         return client
+
+    # ---- atualização do programa (Releases do GitHub) -----------------------
+
+    def auto_check_update(self):
+        self._check_update(manual=False)
+        self.root.after(UPDATE_EVERY_MS, self.auto_check_update)
+
+    def check_update(self):
+        self.check_btn.configure(text="Buscando…", state="disabled")
+        self._check_update(manual=True)
+
+    def _check_update(self, manual):
+        if self._checking:
+            return
+        self._checking = True
+
+        def run():
+            try:
+                up, err = updater.check(), None
+            except Exception as e:
+                up, err = None, e
+                logging.getLogger("multidesk.update").debug("verificação falhou: %s", e)
+            self.post(lambda: self._update_checked(up, err, manual))
+
+        threading.Thread(target=run, name="update-check", daemon=True).start()
+
+    def _update_checked(self, up, err, manual):
+        self._checking = False
+        self.check_btn.configure(text="Buscar atualização", state="normal")
+        if up:
+            self.update = up
+            self.upd_label.configure(text=f"Nova versão disponível: {up.version}")
+            self.upd_btn.configure(text="Atualizar" if up.asset else "Baixar")
+            if not self.upd_bar.winfo_ismapped():
+                self.upd_bar.pack(fill="x", padx=self._pad, pady=(0, 8), after=self.head)
+            if self.cfg.get("notified_version") != up.version:
+                self.cfg["notified_version"] = up.version
+                save_config(self.cfg)
+                self.tray.notify(f"MultiDesk {up.version} disponível. Abra a janela para atualizar.")
+        elif manual and err:
+            messagebox.showerror("MultiDesk", f"Não consegui verificar atualizações:\n{err}")
+        elif manual:
+            messagebox.showinfo("MultiDesk", f"Você já está na versão mais recente ({__version__}).")
+
+    def open_update(self):
+        up = self.update
+        if not up:
+            return
+        if not up.asset:
+            # Rodando do código-fonte (ou sem pacote para este sistema): abre a página da release.
+            webbrowser.open(up.page)
+            return
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("Atualizar o MultiDesk")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=BG)
+        dlg.transient(self.root)
+        ctk.CTkLabel(dlg, text=f"MultiDesk {up.version}", font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=TEXT).pack(anchor="w", padx=22, pady=(18, 2))
+        ctk.CTkLabel(dlg, text=f"Você está na versão {__version__}.", text_color=MUTED,
+                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=22)
+        notes = ctk.CTkTextbox(dlg, width=460, height=200, wrap="word", fg_color=CARD, border_width=1,
+                               border_color=BORDER, corner_radius=10, font=ctk.CTkFont(size=12))
+        notes.insert("end", up.notes or "Sem notas para esta versão.")
+        notes.configure(state="disabled")
+        notes.pack(fill="both", padx=22, pady=(10, 8))
+        warn = ("O compartilhamento para por alguns segundos e volta sozinho depois de atualizar.\n"
+                if self.worker else "")
+        status = ctk.CTkLabel(dlg, text=warn + "O MultiDesk vai baixar, instalar e abrir de novo.",
+                              text_color=MUTED, justify="left", font=ctk.CTkFont(size=12))
+        status.pack(anchor="w", padx=22)
+        bar = ctk.CTkProgressBar(dlg, progress_color=ACCENT)
+        bar.set(0)
+        btns = ctk.CTkFrame(dlg, fg_color="transparent")
+        btns.pack(side="bottom", fill="x", padx=22, pady=(14, 18))
+        cancel = {"flag": False}
+
+        def close():
+            cancel["flag"] = True
+            dlg.destroy()
+
+        def failed(msg):
+            if not dlg.winfo_exists():
+                return
+            bar.pack_forget()
+            status.configure(text=msg, text_color=BAD)
+            go.configure(state="normal", text="Tentar de novo")
+
+        def start():
+            go.configure(state="disabled", text="Baixando…")
+            bar.pack(fill="x", padx=22, pady=(8, 0), before=btns)
+            status.configure(text="Baixando a atualização…", text_color=MUTED)
+
+            def run():
+                try:
+                    path = updater.download(up, lambda p: self.post(lambda: dlg.winfo_exists() and bar.set(p)),
+                                            lambda: cancel["flag"])
+                except Exception as e:
+                    if not cancel["flag"]:
+                        msg = f"Falha no download: {e}"
+                        self.post(lambda: failed(msg))
+                    return
+                if not cancel["flag"]:
+                    self.post(lambda: install(path))
+
+            threading.Thread(target=run, name="update-download", daemon=True).start()
+
+        def install(path):
+            if not dlg.winfo_exists():
+                return
+            cancel_btn.configure(state="disabled")
+            go.configure(text="Instalando…")
+            # Lembra se estava rodando para voltar a compartilhar/conectar depois.
+            self.save()
+            self.cfg["was_running"] = self.worker is not None
+            save_config(self.cfg)
+            if updater.install_kind() == "windows":
+                try:
+                    updater.apply(path)
+                except Exception as e:
+                    self.cfg.pop("was_running", None)
+                    save_config(self.cfg)
+                    failed(f"Não consegui abrir o instalador: {e}")
+                    cancel_btn.configure(state="normal")
+                    return
+                self.quit()  # o instalador substitui os arquivos e reabre o app
+                return
+            status.configure(text="Confirme a senha na janela que vai abrir…", text_color=MUTED)
+
+            def run():
+                try:
+                    updater.apply(path)
+                except Exception as e:
+                    def fail(e=e):
+                        self.cfg.pop("was_running", None)
+                        save_config(self.cfg)
+                        cancel_btn.configure(state="normal")
+                        failed(str(e))
+                    self.post(fail)
+                    return
+
+                def done():
+                    self.restart_cmd = updater.restart_command()
+                    self.quit()
+                self.post(done)
+
+            threading.Thread(target=run, name="update-install", daemon=True).start()
+
+        go = ctk.CTkButton(btns, text="Atualizar agora", fg_color=ACCENT, hover_color=ACCENT_HOVER, height=36,
+                           command=start)
+        go.pack(side="right")
+        cancel_btn = ctk.CTkButton(btns, text="Agora não", fg_color="transparent", text_color=TEXT,
+                                   hover_color=BORDER, border_width=1, border_color=BORDER, width=100,
+                                   height=36, command=close)
+        cancel_btn.pack(side="left")
+        dlg.protocol("WM_DELETE_WINDOW", lambda: cancel_btn.cget("state") != "disabled" and close())
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        dlg.after(50, lambda: (dlg.lift(), dlg.focus_force(), dlg.grab_set()))
 
     # ---- atualização da tela ----------------------------------------------
 
@@ -523,7 +856,8 @@ class App:
             connected = running and w.connected
             rtt = w.rtt if running else None
             self.cli_map.set({"title": (w.server_name if connected and w.server_name else "Servidor"),
-                              "sub": "", "style": "server"},
+                              "sub": fmt_ping(rtt) if connected else "", "sub_color": ping_color(rtt),
+                              "style": "server"},
                              {self.side: {"title": "Este PC", "sub": SIDE_LABEL[self.side], "style": "main"}})
             self.cli_status.configure(text=text)
             if connected:
@@ -543,6 +877,7 @@ class App:
         if mode != getattr(self, "_last_mode", mode):
             self.srv_map.redraw()
             self.cli_map.redraw()
+            self.scroll.recolor()
         self._last_mode = mode
         self.refresh()
         self.root.after(1000, self.tick)
@@ -661,7 +996,7 @@ class App:
         self.root.destroy()
 
 
-def _claim_single_instance():
+def _claim_single_instance(notify=True):
     """Retorna o socket se esta é a primeira instância; senão pede para a outra aparecer."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -670,6 +1005,8 @@ def _claim_single_instance():
         return sock
     except OSError:
         sock.close()
+    if not notify:
+        return None
     try:
         with socket.create_connection(("127.0.0.1", INSTANCE_PORT), timeout=2) as c:
             c.sendall(b"show")
@@ -678,12 +1015,19 @@ def _claim_single_instance():
     return None
 
 
-def main(autostarted=False):
+def main(autostarted=False, resume=False):
     sock = _claim_single_instance()
+    if sock is None and resume:
+        # Reaberto pelo atualizador: a versão antiga pode estar terminando de fechar.
+        for _ in range(20):
+            threading.Event().wait(0.25)
+            sock = _claim_single_instance(notify=False)
+            if sock:
+                break
     if sock is None:
         return
     root = ctk.CTk()
-    app = App(root, autostarted=autostarted)
+    app = App(root, autostarted=autostarted, resume=resume)
 
     def listen():
         while True:
@@ -698,3 +1042,5 @@ def main(autostarted=False):
     threading.Thread(target=listen, name="instance", daemon=True).start()
     root.mainloop()
     sock.close()
+    if app.restart_cmd:  # depois de atualizado: abre a versão nova
+        subprocess.Popen(app.restart_cmd, start_new_session=True, close_fds=True)

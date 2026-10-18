@@ -2,10 +2,12 @@
 
 import logging
 import socket
+import statistics
 import threading
 import time
+from collections import deque
 
-from . import platform
+from . import platform, wifi
 from .clipboard import ClipboardSync, clip_message, parse_clip
 from .crypto import AuthError, handshake
 from .link import parse_link
@@ -13,7 +15,9 @@ from .link import parse_link
 log = logging.getLogger("multidesk.client")
 
 TIMEOUT = 10.0
-PING_INTERVAL = 1.0
+PING_INTERVAL = 0.5
+PING_SAMPLES = 5  # o ping mostrado é a mediana das últimas medições
+NO_PONG_WARN = 5.0
 RETRY_DELAY = 3.0
 
 
@@ -27,12 +31,16 @@ class Client:
         self.status = "desconectado"
         self.server_name = None
         self.rtt = None  # ping em ms (ida e volta)
+        self._rtts = deque(maxlen=PING_SAMPLES)
+        self._last_pong = 0.0
+        self._wifi = None
         self.injector = platform.Injector()
         self.clipboard = ClipboardSync(self._clip_local) if clipboard else None
         self._chan = None
         self._stop = threading.Event()
 
     def start(self):
+        self._wifi = wifi.low_latency()
         if self.clipboard:
             self.clipboard.start()
         threading.Thread(target=self.run, name="client", daemon=True).start()
@@ -44,6 +52,8 @@ class Client:
             self._chan.close()
         if self.clipboard:
             self.clipboard.stop()
+        if self._wifi:
+            self._wifi.close()
 
     def run(self):
         while not self._stop.is_set():
@@ -63,6 +73,7 @@ class Client:
             finally:
                 self.connected = False
                 self.rtt = None
+                self._rtts.clear()
                 self.injector.release_all()
             if self._stop.wait(RETRY_DELAY):
                 break
@@ -105,7 +116,13 @@ class Client:
             self._chan = None
 
     def _ping_loop(self, chan, done):
+        started = time.monotonic()
+        warned = False
         while True:
+            if not warned and not self._rtts and time.monotonic() - started > NO_PONG_WARN:
+                warned = True
+                log.warning("O servidor não responde ao ping deste PC. Confira se os dois PCs estão "
+                            "na mesma versão do MultiDesk.")
             try:
                 chan.send({"t": "ping", "ts": time.monotonic()})
             except OSError:
@@ -133,8 +150,15 @@ class Client:
                     threading.Thread(target=self.clipboard.set, args=content, daemon=True).start()
             elif t == "ping":
                 self._chan.send({"t": "pong", "ts": msg.get("ts")})
+                # Sem medição própria recente, mostra o ping que o servidor mediu.
+                theirs = msg.get("rtt")
+                if isinstance(theirs, (int, float)) and time.monotonic() - self._last_pong > 3 * PING_INTERVAL:
+                    self.rtt = theirs
+                    self.on_change()
             elif t == "pong" and isinstance(msg.get("ts"), (int, float)):
-                self.rtt = (time.monotonic() - msg["ts"]) * 1000
+                self._last_pong = time.monotonic()
+                self._rtts.append((self._last_pong - msg["ts"]) * 1000)
+                self.rtt = statistics.median(self._rtts)
                 self.on_change()
         except Exception:
             log.exception("erro executando %s", t)

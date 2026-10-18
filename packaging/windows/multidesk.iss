@@ -50,11 +50,18 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\MultiDesk.exe"; Description: "Abrir o MultiDesk agora"; Flags: nowait postinstall skipifsilent
+; Atualização pelo próprio app (/VERYSILENT /RELAUNCH=1): reabre e retoma o que estava rodando.
+Filename: "{app}\MultiDesk.exe"; Parameters: "--resume"; Flags: nowait; Check: ShouldRelaunch
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/f /im MultiDesk.exe"; Flags: runhidden; RunOnceId: "KillMultiDesk"
 
 [Code]
+function ShouldRelaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   { O próprio app pode ter ligado "iniciar com o sistema"; remove ao desinstalar. }
