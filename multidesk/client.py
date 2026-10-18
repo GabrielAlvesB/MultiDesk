@@ -18,6 +18,7 @@ TIMEOUT = 10.0
 PING_INTERVAL = 0.5
 PING_SAMPLES = 5  # o ping mostrado é a mediana das últimas medições
 NO_PONG_WARN = 5.0
+UDP_REGISTER = 1.0  # a cada quanto avisa o servidor para onde mandar o mouse
 RETRY_DELAY = 3.0
 
 
@@ -106,6 +107,9 @@ class Client:
             self._set_status("conectado")
             pinger = threading.Event()
             threading.Thread(target=self._ping_loop, args=(chan, pinger), daemon=True).start()
+            if reply.get("udp") and chan.datagrams:
+                threading.Thread(target=self._udp_loop, args=(chan.datagrams, pinger),
+                                 name="udp", daemon=True).start()
             try:
                 while not self._stop.is_set():
                     self._handle(chan.recv())
@@ -114,6 +118,48 @@ class Client:
         finally:
             chan.close()
             self._chan = None
+
+    def _udp_loop(self, dg, done):
+        """Recebe a posição do cursor por UDP (ver Remote._send no servidor).
+
+        Se o UDP não passar (firewall), o servidor continua mandando pelo TCP.
+        """
+        try:
+            u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            u.connect((self.host, self.port))
+            u.settimeout(0.25)
+        except OSError as e:
+            log.info("Sem UDP (%s); o mouse vem pelo TCP", e)
+            return
+        next_reg = 0.0
+        first = True
+        try:
+            while not done.is_set():
+                now = time.monotonic()
+                if now >= next_reg:  # também mantém o caminho aberto em firewalls
+                    next_reg = now + UDP_REGISTER
+                    try:
+                        u.send(dg.seal({"t": "udp"}))
+                    except OSError:
+                        pass
+                try:
+                    data = u.recv(2048)
+                except socket.timeout:
+                    continue
+                except OSError:  # Windows: porta inacessível; tenta de novo no próximo registro
+                    done.wait(0.25)
+                    continue
+                msg = dg.open(data)
+                if msg and msg.get("t") == "move":
+                    if first:
+                        first = False
+                        log.info("Mouse chegando por UDP (mais fluido no Wi-Fi)")
+                    try:
+                        self.injector.move(msg["x"], msg["y"])
+                    except Exception:
+                        log.exception("erro movendo o cursor")
+        finally:
+            u.close()
 
     def _ping_loop(self, chan, done):
         started = time.monotonic()
@@ -139,6 +185,8 @@ class Client:
             elif t == "key":
                 inj.key(msg["key"], msg["down"])
             elif t == "button":
+                if "x" in msg:  # o cursor pode vir por outro caminho (UDP): clica no lugar certo
+                    inj.move(msg["x"], msg["y"])
                 inj.button(msg["b"], msg["down"])
             elif t == "scroll":
                 inj.scroll(msg["dx"], msg["dy"])

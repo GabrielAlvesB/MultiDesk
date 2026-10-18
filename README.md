@@ -21,10 +21,13 @@ Foi escrito do zero em Python: não usa código do Deskflow.
 
 - Toda a comunicação é criptografada (X25519 + AES-GCM). Sem o código, ninguém conecta,
   e quem só escuta a rede não consegue ver o que você digita.
+- A posição do cursor vai por **UDP** (na mesma porta): um pacote perdido no Wi-Fi não
+  congela o cursor esperando retransmissão, a posição mais nova sempre ganha. Cliques,
+  teclas e área de transferência vão pelo TCP. Se o UDP estiver bloqueado, tudo vai pelo TCP.
 - Dá para conectar até 4 clientes, um em cada lado da tela do servidor (direita, esquerda, acima, abaixo).
 - **Scroll Lock** prende o cursor na tela em que ele está (bom para jogos). Aperte de novo para soltar.
 - Se um cliente cai enquanto você está controlando ele, o controle volta na hora para o servidor.
-- A janela mostra o **ping** de cada conexão, atualizado a cada segundo
+- A janela mostra o **ping** de cada conexão, nos dois PCs
   (verde até 30 ms, amarelo até 100 ms, vermelho acima disso).
 
 ## Instalação
@@ -92,8 +95,9 @@ Detalhes por ambiente:
 - **Ícone na bandeja** no Hyprland, Sway e niri: aparece se a sua barra tiver bandeja
   (no Waybar, o módulo `tray`).
 
-Se o servidor for Linux e usar firewall: `sudo ufw allow 24850/tcp`
-(no CachyOS/Arch com firewalld: `sudo firewall-cmd --permanent --add-port=24850/tcp && sudo firewall-cmd --reload`).
+Se o servidor for Linux e usar firewall: `sudo ufw allow 24850` (TCP e UDP)
+(no CachyOS/Arch com firewalld: `sudo firewall-cmd --permanent --add-port=24850/tcp --add-port=24850/udp && sudo firewall-cmd --reload`).
+Sem o UDP liberado tudo funciona, só que o cursor vai pelo TCP e fica menos fluido no Wi-Fi.
 
 ### Segundo plano e iniciar com o sistema
 

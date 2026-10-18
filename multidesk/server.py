@@ -27,6 +27,7 @@ PING_SAMPLES = 5  # o ping mostrado é a mediana das últimas medições
 TIMEOUT = 10.0
 MOVE_INTERVAL = 1 / 250  # no máximo 250 posições do cursor por segundo
 KEEPALIVE = 0.04  # enquanto controla um PC, nunca fica mais que isso sem mandar nada
+UDP_STALE = 5.0  # sem notícia do UDP do cliente há mais que isso: volta a usar só o TCP
 
 
 def _coalesce_moves(msgs):
@@ -55,6 +56,9 @@ class Remote:
         self.rtt = None  # ping em ms (ida e volta)
         self._rtts = deque(maxlen=PING_SAMPLES)
         self._q = queue.Queue()
+        self.udp_addr = None  # de onde o cliente manda o registro UDP
+        self.udp_seen = 0.0
+        self.last_pos = None  # última posição do cursor mandada
 
     def start(self):
         threading.Thread(target=self._writer, name=f"tx-{self.name}", daemon=True).start()
@@ -76,6 +80,36 @@ class Remote:
                 batch.append(self._q.get_nowait())
             except queue.Empty:
                 return
+
+    def _udp_target(self):
+        if self.udp_addr and self.server._udp and time.monotonic() - self.udp_seen < UDP_STALE:
+            return self.udp_addr
+        return None
+
+    def _send_udp(self, msg, addr):
+        try:
+            self.server._udp.sendto(self.chan.datagrams.seal(msg), addr)
+            return True
+        except OSError as e:
+            log.debug("UDP para %s falhou: %s", self.name, e)
+            return False
+
+    def _send(self, out):
+        """Movimentos pelo UDP (se o cliente registrou), o resto pelo TCP.
+
+        No TCP tudo chega em ordem: um pacote perdido no Wi-Fi segura todos os
+        seguintes até ser retransmitido, e o cursor congela. Pelo UDP cada
+        posição vale sozinha e a mais nova sempre ganha. Cliques levam a
+        posição junto, então não importa se chegam antes ou depois.
+        """
+        moves = [m for m in out if m.get("t") == "move"]
+        if moves:
+            self.last_pos = (moves[-1]["x"], moves[-1]["y"])
+        addr = self._udp_target()
+        if addr and moves and self._send_udp(moves[-1], addr):
+            out = [m for m in out if m.get("t") != "move"]
+        if out:
+            self.chan.send_many(out)
 
     def _writer(self):
         # Fila + thread própria: o hook de entrada nunca espera pela rede.
@@ -101,7 +135,12 @@ class Remote:
                     # bateria, e o próximo clique/movimento espera ele acordar
                     # (50-100 ms). Enquanto controlamos esse PC, um pacotinho
                     # a cada KEEPALIVE o mantém acordado.
-                    self.chan.send({"t": "k"})
+                    # Pelo UDP o pacotinho é a própria posição atual: se a
+                    # última se perdeu no caminho, esta corrige o cursor.
+                    addr = self._udp_target()
+                    if not (addr and self.last_pos and self._send_udp(
+                            {"t": "move", "x": self.last_pos[0], "y": self.last_pos[1]}, addr)):
+                        self.chan.send({"t": "k"})
                     last_sent = now
                 wait = next_ping - now
                 if active:
@@ -122,7 +161,7 @@ class Remote:
                     batch = batch[:batch.index(None)]
                 out = _coalesce_moves(batch)
                 if out:
-                    self.chan.send_many(out)
+                    self._send(out)
                     last_sent = time.monotonic()
                     if out[-1].get("t") == "move":
                         last_move = last_sent
@@ -166,6 +205,7 @@ class Server:
         self.vx = self.vy = 0.0
         self._lock = threading.RLock()
         self._sock = None
+        self._udp = None
         self._running = False
         self._wifi = None
         self.bounds = platform.screen_bounds()
@@ -183,9 +223,17 @@ class Server:
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("0.0.0.0", self.port))
         self._sock.listen()
+        try:  # mesma porta, em UDP, para os movimentos do mouse
+            self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._udp.bind(("0.0.0.0", self.port))
+        except OSError as e:
+            log.warning("Sem UDP na porta %d (%s); o mouse vai só pelo TCP", self.port, e)
+            self._udp = None
         self._running = True
         self._wifi = wifi.low_latency()
         threading.Thread(target=self._accept_loop, name="accept", daemon=True).start()
+        if self._udp:
+            threading.Thread(target=self._udp_loop, name="udp", daemon=True).start()
         self.capture.start()
         if self.clipboard:
             self.clipboard.start()
@@ -206,6 +254,8 @@ class Server:
             self.clipboard.stop()
         if self._sock:
             self._sock.close()
+        if self._udp:
+            self._udp.close()
         if self._wifi:
             self._wifi.close()
         log.info("Servidor parado: mouse e teclado não são mais compartilhados")
@@ -220,6 +270,26 @@ class Server:
             except OSError:
                 break
             threading.Thread(target=self._handle_new, args=(conn, addr), daemon=True).start()
+
+    def _udp_loop(self):
+        """Recebe o registro UDP dos clientes (diz para onde mandar o mouse)."""
+        sock = self._udp
+        while self._running:
+            try:
+                data, addr = sock.recvfrom(2048)
+            except OSError:
+                if not self._running:
+                    break
+                continue  # Windows avisa assim quando um envio anterior não foi entregue
+            for r in list(self.remotes.values()):
+                msg = r.chan.datagrams.open(data) if r.chan.datagrams else None
+                if msg is None:
+                    continue
+                if msg.get("t") == "udp":
+                    if r.udp_addr != addr:
+                        log.info("%s: mouse indo por UDP (mais fluido no Wi-Fi)", r.name)
+                    r.udp_addr, r.udp_seen = addr, time.monotonic()
+                break
 
     def _handle_new(self, conn, addr):
         ip = addr[0]
@@ -256,7 +326,7 @@ class Server:
                 return
             remote = Remote(self, chan, addr, name, bounds, side)
             self.remotes[side] = remote
-        chan.send({"t": "welcome", "side": side, "server": socket.gethostname()})
+        chan.send({"t": "welcome", "side": side, "server": socket.gethostname(), "udp": self._udp is not None})
         remote.start()
         log.info("%s (%s) conectou — fica à %s desta tela, %dx%d",
                  name, ip, SIDE_PT[side], bounds[2], bounds[3])
@@ -394,7 +464,7 @@ class Server:
     def on_button(self, name, down):
         remote = self.active
         if remote:
-            remote.send({"t": "button", "b": name, "down": down})
+            remote.send({"t": "button", "b": name, "down": down, "x": int(self.vx), "y": int(self.vy)})
 
     def on_scroll(self, dx, dy):
         remote = self.active

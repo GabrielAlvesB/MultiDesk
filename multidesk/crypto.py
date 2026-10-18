@@ -9,6 +9,9 @@ a rede não consegue ler nada (nem sabendo o código, graças ao X25519).
 
 Depois do handshake cada mensagem é JSON cifrado com AES-GCM, num quadro
 [4 bytes de tamanho][texto cifrado]. O nonce é um contador por direção.
+
+A posição do cursor também pode ir por UDP (Datagrams), com chaves próprias
+derivadas do mesmo handshake.
 """
 
 import hashlib
@@ -27,6 +30,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from .link import normalize_code
 
 MAGIC = b"MDSK1"
+MAGIC_UDP = b"MDU1"
 MAX_FRAME = 32 * 1024 * 1024  # cabe uma imagem de 16 MB em base64
 
 
@@ -53,6 +57,7 @@ class SecureChannel:
         self._recv_ctr = 0
         self._send_lock = threading.Lock()
         self._buf = bytearray()  # bytes já recebidos e ainda não lidos
+        self.datagrams = None  # Datagrams: cifra dos pacotes UDP desta sessão
 
     def send(self, msg):
         self.send_many((msg,))
@@ -117,8 +122,11 @@ def handshake(sock, code, is_server):
 
     shared = eph.exchange(X25519PublicKey.from_public_bytes(peer_pub))
     code_key = hashlib.scrypt(normalize_code(code).encode(), salt=th, n=2**14, r=8, p=1, dklen=32)
-    okm = HKDF(algorithm=hashes.SHA256(), length=96, salt=code_key, info=b"multidesk v1" + th).derive(shared)
-    k_c2s, k_s2c, k_confirm = okm[:32], okm[32:64], okm[64:]
+    # As 96 primeiras bytes são as mesmas de antes (o HKDF só estende a saída),
+    # então versões antigas continuam compatíveis; o resto são as chaves do UDP.
+    okm = HKDF(algorithm=hashes.SHA256(), length=160, salt=code_key, info=b"multidesk v1" + th).derive(shared)
+    k_c2s, k_s2c, k_confirm = okm[:32], okm[32:64], okm[64:96]
+    u_c2s, u_s2c = okm[96:128], okm[128:160]
 
     tag_server = hmac.new(k_confirm, b"server" + th, hashlib.sha256).digest()
     tag_client = hmac.new(k_confirm, b"client" + th, hashlib.sha256).digest()
@@ -128,7 +136,9 @@ def handshake(sock, code, is_server):
         if not hmac.compare_digest(_recv_exact(sock, 32), tag_client):
             raise AuthError("código de pareamento errado")
         sock.sendall(tag_server)
-        return SecureChannel(sock, k_s2c, k_c2s)
+        chan = SecureChannel(sock, k_s2c, k_c2s)
+        chan.datagrams = Datagrams(u_s2c, u_c2s)
+        return chan
     sock.sendall(tag_client)
     try:
         ok = hmac.compare_digest(_recv_exact(sock, 32), tag_server)
@@ -136,4 +146,45 @@ def handshake(sock, code, is_server):
         ok = False
     if not ok:
         raise AuthError("código de pareamento errado")
-    return SecureChannel(sock, k_c2s, k_s2c)
+    chan = SecureChannel(sock, k_c2s, k_s2c)
+    chan.datagrams = Datagrams(u_c2s, u_s2c)
+    return chan
+
+
+class Datagrams:
+    """Cifra pacotes UDP soltos: [MAGIC_UDP][8 bytes de sequência][texto cifrado].
+
+    Cada pacote se abre sozinho (não depende dos anteriores), e só é aceito se
+    a sequência for maior que a do último aceito: pacote velho, atrasado ou
+    repetido é descartado.
+    """
+
+    def __init__(self, send_key, recv_key):
+        self._send = AESGCM(send_key)
+        self._recv = AESGCM(recv_key)
+        self._send_seq = 0
+        self._lock = threading.Lock()
+        self.last_seq = 0
+
+    def seal(self, msg):
+        data = json.dumps(msg, separators=(",", ":")).encode()
+        with self._lock:
+            self._send_seq += 1
+            seq = self._send_seq.to_bytes(8, "big")
+        return MAGIC_UDP + seq + self._send.encrypt(bytes(4) + seq, data, MAGIC_UDP)
+
+    def open(self, packet):
+        """Mensagem do pacote, ou None se for inválido, de outra sessão ou velho."""
+        head = len(MAGIC_UDP) + 8
+        if len(packet) <= head or not packet.startswith(MAGIC_UDP):
+            return None
+        seq_b = packet[len(MAGIC_UDP):head]
+        seq = int.from_bytes(seq_b, "big")
+        if seq <= self.last_seq:
+            return None
+        try:
+            data = self._recv.decrypt(bytes(4) + seq_b, packet[head:], MAGIC_UDP)
+        except Exception:
+            return None
+        self.last_seq = seq
+        return json.loads(data)
