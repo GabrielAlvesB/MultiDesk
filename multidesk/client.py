@@ -20,6 +20,7 @@ PING_SAMPLES = 5  # o ping mostrado é a mediana das últimas medições
 NO_PONG_WARN = 5.0
 UDP_REGISTER = 1.0  # a cada quanto avisa o servidor para onde mandar o mouse
 RETRY_DELAY = 3.0
+SIDE_PT = {"right": "à direita", "left": "à esquerda", "top": "acima", "bottom": "abaixo"}
 
 
 class Client:
@@ -39,6 +40,9 @@ class Client:
         self.clipboard = ClipboardSync(self._clip_local) if clipboard else None
         self._chan = None
         self._stop = threading.Event()
+        self.side_error = None  # recusa do servidor ao trocar de lado (a janela mostra)
+        self._can_change_side = False  # o servidor aceita trocar de lado sem reconectar
+        self._quick_retry = threading.Event()
 
     def start(self):
         self._wifi = wifi.low_latency()
@@ -56,6 +60,22 @@ class Client:
         if self._wifi:
             self._wifi.close()
 
+    def change_side(self, side):
+        """Muda de que lado do servidor esta tela fica (conectado ou não)."""
+        self.side = side
+        chan = self._chan
+        if not (chan and self.connected):
+            return  # vale na próxima conexão
+        if self._can_change_side:
+            try:
+                chan.send({"t": "side", "side": side})
+            except OSError:
+                pass
+        else:  # servidor de versão antiga: reconecta já pedindo o lado novo
+            log.info("Reconectando para mudar de lado")
+            self._quick_retry.set()
+            chan.close()
+
     def run(self):
         while not self._stop.is_set():
             try:
@@ -69,14 +89,16 @@ class Client:
                 log.error("Servidor recusou: %s", e)
                 return
             except (OSError, ConnectionError, ValueError) as e:
-                if not self._stop.is_set():
+                if not self._stop.is_set() and not self._quick_retry.is_set():
                     log.warning("Conexão com %s:%d falhou: %s", self.host, self.port, e)
             finally:
                 self.connected = False
                 self.rtt = None
                 self._rtts.clear()
                 self.injector.release_all()
-            if self._stop.wait(RETRY_DELAY):
+            if self._quick_retry.is_set():
+                self._quick_retry.clear()
+            elif self._stop.wait(RETRY_DELAY):
                 break
             self._set_status("reconectando")
         self._set_status("desconectado")
@@ -101,8 +123,9 @@ class Client:
                 raise FatalError(reply.get("msg"))
             self.connected = True
             self.server_name = reply.get("server")
-            side = {"right": "à direita", "left": "à esquerda", "top": "acima",
-                    "bottom": "abaixo"}.get(reply.get("side"), reply.get("side"))
+            self.side = reply.get("side") or self.side  # o servidor pode ter escolhido outro lado
+            self._can_change_side = bool(reply.get("sides"))
+            side = SIDE_PT.get(reply.get("side"), reply.get("side"))
             log.info("Conectado ao servidor %s (esta tela fica %s dele)", reply.get("server"), side)
             self._set_status("conectado")
             pinger = threading.Event()
@@ -190,6 +213,14 @@ class Client:
                 inj.button(msg["b"], msg["down"])
             elif t == "scroll":
                 inj.scroll(msg["dx"], msg["dy"])
+            elif t == "side":  # resposta ao pedido de troca de lado
+                self.side = msg.get("side") or self.side
+                if msg.get("error"):
+                    self.side_error = msg["error"]
+                    log.warning("%s", msg["error"])
+                else:
+                    log.info("Esta tela agora fica %s do servidor", SIDE_PT.get(self.side, self.side))
+                self.on_change()
             elif t == "leave":
                 inj.release_all()
             elif t == "clip" and self.clipboard:

@@ -178,6 +178,8 @@ class Remote:
                 t = msg.get("t")
                 if t == "clip":
                     self.server._clip_from(self, msg)
+                elif t == "side":
+                    self.server._change_side(self, msg.get("side"))
                 elif t == "ping":
                     # Direto, sem passar pela fila: senão o ping mede a fila
                     # de movimentos em vez da rede.
@@ -317,16 +319,17 @@ class Server:
                 chan.send({"t": "error", "msg": "Não há lado livre no servidor (máximo 4 clientes)."})
                 chan.close()
                 return
+            for stale in [r for r in self.remotes.values() if r.name == name]:
+                self._drop(stale)  # mesmo PC reconectando (talvez em outro lado)
             old = self.remotes.get(side)
-            if old and old.name == name:
-                self._drop(old)  # mesmo PC reconectando
-            elif old:
+            if old:
                 chan.send({"t": "error", "msg": f"O lado '{side}' já está ocupado por {old.name}."})
                 chan.close()
                 return
             remote = Remote(self, chan, addr, name, bounds, side)
             self.remotes[side] = remote
-        chan.send({"t": "welcome", "side": side, "server": socket.gethostname(), "udp": self._udp is not None})
+        chan.send({"t": "welcome", "side": side, "server": socket.gethostname(), "udp": self._udp is not None,
+                   "sides": True})  # aceita trocar de lado sem reconectar
         remote.start()
         log.info("%s (%s) conectou — fica à %s desta tela, %dx%d",
                  name, ip, SIDE_PT[side], bounds[2], bounds[3])
@@ -335,13 +338,38 @@ class Server:
     def _pick_side(self, name, wanted):
         if name in self.layout:
             return self.layout[name]
-        taken = set(self.remotes) | set(self.layout.values())
+        # Lados ocupados por outros PCs (o próprio PC reconectando não conta).
+        taken = {s for s, r in self.remotes.items() if r.name != name} | set(self.layout.values())
+        if wanted in SIDES and wanted not in taken:
+            return wanted  # o lado escolhido na janela do cliente vale, mesmo reconectando
         old = next((s for s, r in self.remotes.items() if r.name == name), None)
         if old:
             return old
-        if wanted in SIDES and (wanted not in taken):
-            return wanted
         return next((s for s in SIDES if s not in taken), None)
+
+    def _change_side(self, remote, side):
+        """O cliente pediu para ficar em outro lado (escolheu no desenho já conectado)."""
+        err = None
+        with self._lock:
+            if self.remotes.get(remote.side) is not remote or side not in SIDES or side == remote.side:
+                pass
+            elif side in self.remotes:
+                err = f"Esse lado do servidor já tem outro PC: {self.remotes[side].name}."
+            elif side in self.layout.values() or remote.name in self.layout:
+                err = "Os lados deste servidor foram fixados na linha de comando."
+            else:
+                if self.active is remote:
+                    self._leave(self._local_center())
+                del self.remotes[remote.side]
+                remote.side = side
+                self.remotes[side] = remote
+                log.info("%s mudou de lado: agora fica %s desta tela", remote.name,
+                         {"right": "à direita", "left": "à esquerda"}.get(side, SIDE_PT[side]))
+        reply = {"t": "side", "side": remote.side}
+        if err:
+            reply["error"] = err
+        remote.send(reply)
+        self.on_change()
 
     def _drop(self, remote):
         with self._lock:

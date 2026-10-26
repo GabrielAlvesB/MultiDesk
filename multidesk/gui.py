@@ -9,7 +9,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import font as tkfont, messagebox
 
 import customtkinter as ctk
 
@@ -108,6 +108,10 @@ class ScrollArea(ctk.CTkFrame):
             self.after_idle(self._fit)
 
     def _fit(self):
+        # Termina antes os cálculos de layout pendentes: senão a altura pedida
+        # pelo conteúdo ainda é a do layout anterior (ex.: ao trocar para duas
+        # colunas) e a área fica maior que o necessário, com rolagem à toa.
+        self.update_idletasks()
         self._pending = False
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
         if cw < 2 or ch < 2:
@@ -155,6 +159,9 @@ class LayoutMap(ctk.CTkFrame):
         self.center = {"title": "", "sub": "", "style": "main"}
         self.slots = {}  # lado -> dict(title, sub, sub_color, style)
         self._hit = {}
+        self._last_error = None
+        # Fonte padrão do sistema: existe sempre (no Linux não há "Segoe UI").
+        self.family = tkfont.nametofont("TkDefaultFont", root=self).actual("family")
 
     def set(self, center, slots):
         self.center, self.slots = center, slots
@@ -183,16 +190,29 @@ class LayoutMap(ctk.CTkFrame):
         s *= min(max(mh / (70 * s), 1), 2.2)
         gx, gy = mw * 0.18, mh * 0.2
         cx, cy = w / 2, h / 2
+        # As áreas de clique vêm antes do desenho: mesmo que algo falhe ao
+        # desenhar, dá para escolher o lado.
         self._hit = {}
-        self._monitor(cx, cy, mw, mh, s, **self.center)
+        for side, (dx, dy) in self.POS.items():
+            x, y = cx + dx * (mw + gx), cy + dy * (mh + gy)
+            self._hit[side] = (x - mw / 2, y - mh / 2, x + mw / 2, y + mh / 2)
+        # Cada monitor é desenhado à parte: um erro num não apaga os outros.
+        self._safe(self._monitor, cx, cy, mw, mh, s, **self.center)
         for side, (dx, dy) in self.POS.items():
             x, y = cx + dx * (mw + gx), cy + dy * (mh + gy)
             slot = self.slots.get(side)
             if slot:
-                self._monitor(x, y, mw, mh, s, **slot)
+                self._safe(self._monitor, x, y, mw, mh, s, **slot)
             else:
-                self._empty(x, y, mw, mh, s)
-            self._hit[side] = (x - mw / 2, y - mh / 2, x + mw / 2, y + mh / 2)
+                self._safe(self._empty, x, y, mw, mh, s)
+
+    def _safe(self, fn, *args, **kw):
+        try:
+            fn(*args, **kw)
+        except Exception as e:
+            if repr(e) != self._last_error:  # registra cada erro diferente uma vez só
+                self._last_error = repr(e)
+                logging.getLogger("multidesk.gui").exception("erro desenhando os monitores")
 
     def _monitor(self, x, y, mw, mh, s, title="", sub="", sub_color=None, style="main"):
         c = self.canvas
@@ -205,17 +225,17 @@ class LayoutMap(ctk.CTkFrame):
             self._rect(x0 - 4 * s, y0 - 4 * s, x1 + 4 * s, y1 + 4 * s, 12 * s, fill=OK, outline="")
         self._rect(x0, y0, x1, y1, 9 * s, fill=fill, outline="")
         c.create_text(x, y - (7 * s if sub else 0), text=title, fill=fg,
-                      font=("Segoe UI", int(-12 * s), "bold"), width=mw - 10 * s)
+                      font=(self.family, int(-12 * s), "bold"), width=mw - 10 * s)
         if sub:
             col = "#FFFFFF" if light_text else (sub_color or _mode_color(MUTED))
-            c.create_text(x, y + 11 * s, text=sub, fill=col, font=("Segoe UI", int(-11 * s), "bold"))
+            c.create_text(x, y + 11 * s, text=sub, fill=col, font=(self.family, int(-11 * s), "bold"))
 
     def _empty(self, x, y, mw, mh, s):
         c = self.canvas
         col = _mode_color(BORDER)
         c.create_rectangle(x - mw / 2, y - mh / 2, x + mw / 2, y + mh / 2, outline=col, dash=(4, 3), width=max(1, int(1.5 * s)))
         hint = "escolher" if self.on_pick else "" if self.empty_blank else "livre"
-        c.create_text(x, y, text=hint, fill=_mode_color(MUTED), font=("Segoe UI", int(-11 * s)))
+        c.create_text(x, y, text=hint, fill=_mode_color(MUTED), font=(self.family, int(-11 * s)))
 
     def _side_at(self, ev):
         for side, (x0, y0, x1, y1) in self._hit.items():
@@ -283,6 +303,9 @@ class App:
         root.minsize(480, 420)
         root.configure(fg_color=BG)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Erros em callbacks da janela vão para o log (o Tk só imprimia no terminal).
+        root.report_callback_exception = lambda *exc: logging.getLogger("multidesk.gui").error(
+            "erro na janela", exc_info=exc)
         try:
             self._icon = tk.PhotoImage(file=str(ICON))
             root.iconphoto(True, self._icon)
@@ -561,9 +584,13 @@ class App:
         self.scroll.refit()
 
     def pick_side(self, side):
-        if self.worker:
+        from .client import Client
+        if side == self.side:
             return
         self.side = side
+        if isinstance(self.worker, Client):
+            self.worker.change_side(side)  # já conectado: o servidor move este PC na hora
+        self.save()
         self.refresh()
 
     def regen_code(self):
@@ -836,7 +863,7 @@ class App:
         self.mode_btn.configure_state(state)
         for widget in (self.port_entry, self.regen_btn, self.join_entry, self.name_entry):
             widget.configure(state=state)
-        self.cli_map.on_pick = None if running else self.pick_side
+        self.cli_map.on_pick = self.pick_side  # dá para trocar de lado mesmo conectado
 
         if self.mode == "server":
             slots = {}
@@ -855,6 +882,11 @@ class App:
         else:
             connected = running and w.connected
             rtt = w.rtt if running else None
+            if running and w.side in SIDE_LABEL:
+                self.side = w.side  # o lado que o servidor confirmou
+            if running and getattr(w, "side_error", None):
+                err, w.side_error = w.side_error, None
+                self.root.after_idle(lambda: messagebox.showwarning("MultiDesk", err))
             self.cli_map.set({"title": (w.server_name if connected and w.server_name else "Servidor"),
                               "sub": fmt_ping(rtt) if connected else "", "sub_color": ping_color(rtt),
                               "style": "server"},
@@ -871,34 +903,43 @@ class App:
 
         self.tray.update(f"MultiDesk — {self.tray_status()}")
 
+    def _guarded(self, fn):
+        """Roda fn sem deixar um erro parar a atualização da janela."""
+        try:
+            fn()
+        except Exception:
+            logging.getLogger("multidesk.gui").exception("erro atualizando a janela")
+
     def tick(self):
         # Atualiza o ping mesmo sem eventos e acompanha a troca de tema claro/escuro.
+        # O reagendamento vem primeiro: um erro aqui nunca congela a janela.
+        self.root.after(1000, self.tick)
         mode = ctk.get_appearance_mode()
         if mode != getattr(self, "_last_mode", mode):
-            self.srv_map.redraw()
-            self.cli_map.redraw()
-            self.scroll.recolor()
+            self._guarded(self.srv_map.redraw)
+            self._guarded(self.cli_map.redraw)
+            self._guarded(self.scroll.recolor)
         self._last_mode = mode
-        self.refresh()
-        self.root.after(1000, self.tick)
+        self._guarded(self.refresh)
+        self.scroll.refit()
 
     def poll(self):
+        self.root.after(100, self.poll)
         pending = set()
         while not self.ui_q.empty():
             fn = self.ui_q.get_nowait()
             if fn == self.refresh:  # junta vários pedidos de atualização em um
                 pending.add(fn)
             else:
-                fn()
+                self._guarded(fn)
         for fn in pending:
-            fn()
+            self._guarded(fn)
         lines = []
         while not self.log_q.empty():
             lines.append(self.log_q.get_nowait())
         if lines:
             self.log.insert("end", "\n".join(lines) + "\n")
             self.log.see("end")
-        self.root.after(100, self.poll)
 
     # ---- janela / ciclo de vida ------------------------------------------
 
